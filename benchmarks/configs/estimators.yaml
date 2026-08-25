@@ -1,0 +1,12 @@
+# One cell, five ways to get its gradient. The question is not only which
+# scores best but what each costs -- influence_bytes and train_time_s are in
+# the table for that reason.
+env: lanekeep
+steps: 150000
+seeds: 3
+agents:
+  - {name: "rflo", algo: rtrrl, cell: ctrnn, estimator: rflo}
+  - {name: "snap1", algo: rtrrl, cell: ctrnn, estimator: snap1}
+  - {name: "uoro", algo: rtrrl, cell: ctrnn, estimator: uoro}
+  - {name: "rtrl (exact)", algo: rtrrl, cell: ctrnn, estimator: rtrl}
+  - {name: "none (reservoir)", algo: rtrrl, cell: ctrnn, estimator: none}

@@ -1,0 +1,66 @@
+# --- Claude / AI assistant artifacts (never commit) ---
+.claude/
+.claude-tu/
+CLAUDE.md
+.claude.json
+.mcp.json
+**/CLAUDE.local.md
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.eggs
+.venv/
+venv/
+env/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# --- Jupyter ---
+*.ipynb_checkpoints
+
+# --- Data & downloaded artifacts (fetched by scripts, not tracked) ---
+data_cache/
+datasets/raw/
+papers/pdfs/
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+!transformer_playground/**/*.npy
+
+# --- Benchmark outputs ---
+benchmarks/results/*.csv
+benchmarks/results/*.json
+benchmarks/results/*.png
+!benchmarks/results/.gitkeep
+
+# --- Docs build ---
+docs/build/
+docs/source/_build/
+docs/_build/
+docs/_build_test/
+
+# --- OS / editor ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# --- Env / secrets ---
+.env
+*.token
+
+# --- rtrrl-playground run artifacts ---
+runs/
+*.png
+!docs/source/_static/**/*.png

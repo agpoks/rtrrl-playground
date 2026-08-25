@@ -1,0 +1,36 @@
+[project]
+name = "rtrrl-playground"
+version = "0.1.0"
+description = "A tutorial playground for Real-Time Recurrent Reinforcement Learning: RTRL/RFLO gradients + TD(lambda) actor-critic, learned online at every timestep, on small RC-car driving and overtaking tasks."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "agpoks", email = "agnespoks2@gmail.com" }]
+
+dependencies = [
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# Only the BPTT baseline needs torch -- see README "Why NumPy".
+torch = ["torch>=2.2"]
+notebooks = ["jupyter>=1.0", "ipykernel>=6.29"]
+docs = ["sphinx>=7.2", "sphinx-rtd-theme>=2.0", "myst-parser>=2.0", "nbsphinx>=0.9", "sphinxcontrib-bibtex>=2.6"]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[tool.setuptools.packages.find]
+include = ["rtrrl_playground*"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 110
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

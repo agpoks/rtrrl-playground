@@ -1,0 +1,13 @@
+# The classic partially-observable yardsticks, where the RTRRL paper reports.
+# MemoryChain is the one with a known optimum (+1), which makes it the only
+# environment here where "did it learn" is not a judgement call.
+env: memory-chain
+steps: 150000
+seeds: 3
+env_kwargs: {length: 8}
+agents:
+  - {name: "rtrrl/ctrnn", algo: rtrrl, cell: ctrnn}
+  - {name: "rtrrl/ltc", algo: rtrrl, cell: ltc}
+  - {name: "rtrrl/lrcu", algo: rtrrl, cell: lrcu}
+  - {name: "ac_lambda (memoryless)", algo: ac_lambda}
+  - {name: "a2c_bptt (T=32)", algo: a2c_bptt, truncation: 32}
