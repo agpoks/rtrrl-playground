@@ -52,7 +52,7 @@ def main() -> None:
     final = float(np.mean(returns[-args.eval_episodes:])) if len(returns) else float("nan")
     outdir = Path(args.out); outdir.mkdir(parents=True, exist_ok=True)
     if args.render and hasattr(env, "render_rollout"):
-        ev = rollout(env, agent.greedy, n_episodes=1, seed=10_000, keep_history=True)
+        ev = rollout(env, agent.eval_policy(), n_episodes=1, seed=10_000, keep_history=True)
         path = outdir / f"a2c_bptt_{args.env}.png"
         env.render_rollout(ev["history"], str(path), title=f"a2c-bptt / {args.env}")
         print(f"  wrote {path}")

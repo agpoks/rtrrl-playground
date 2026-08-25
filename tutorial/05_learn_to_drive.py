@@ -123,7 +123,7 @@ def main(argv=None):
         final = float(np.mean(out["returns"][-20:]))
         print(f"  {'RTRRL / ' + cell:<24} final {final:7.1f}   "
               f"({out['train_time_s']:.0f} s, influence {agent.cell.influence_bytes() / 1024:.0f} KiB)")
-        ev = rollout(e, agent.greedy, n_episodes=1, seed=10_000, keep_history=True)
+        ev = rollout(e, agent.eval_policy(), n_episodes=1, seed=10_000, keep_history=True)
         e.render_rollout(ev["history"], str(outdir / f"lesson05_{cell}.png"),
                          title=f"RTRRL / {cell} / lanekeep -- return {ev['returns'][0]:.0f}")
 

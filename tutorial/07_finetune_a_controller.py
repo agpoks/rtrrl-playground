@@ -113,7 +113,7 @@ def main(argv=None):
 
     agent = RTRRL(env.obs_dim, env.action_space, cell=args.cell, seed=args.seed)
     agreement = clone(agent, env, Overtaker(), args.bc_steps)
-    ret_bc, passes_bc, crashes_bc, ev_bc = evaluate(env, agent.greedy)
+    ret_bc, passes_bc, crashes_bc, ev_bc = evaluate(env, agent.eval_policy())
     print(f"  after cloning ({args.bc_steps:,} steps, agreement {agreement:.0%}) "
           f"return {ret_bc:7.1f}  passes {passes_bc:4.1f}  crashes {crashes_bc:.0%}")
     env.render_rollout(ev_bc["history"], str(outdir / "lesson07_cloned.png"),
@@ -121,7 +121,7 @@ def main(argv=None):
 
     agent.begin_finetune()
     out = train(env, agent, args.rl_steps, progress=False, seed=args.seed)
-    ret_ft, passes_ft, crashes_ft, ev_ft = evaluate(env, agent.greedy)
+    ret_ft, passes_ft, crashes_ft, ev_ft = evaluate(env, agent.eval_policy())
     print(f"  after RTRRL fine-tuning ({args.rl_steps:,} steps)      "
           f"return {ret_ft:7.1f}  passes {passes_ft:4.1f}  crashes {crashes_ft:.0%}")
     env.render_rollout(ev_ft["history"], str(outdir / "lesson07_finetuned.png"),
@@ -130,7 +130,7 @@ def main(argv=None):
     # The control: the same total budget, spent entirely on RL from scratch.
     scratch = RTRRL(env.obs_dim, env.action_space, cell=args.cell, seed=args.seed)
     train(env, scratch, args.bc_steps + args.rl_steps, progress=False, seed=args.seed)
-    ret_s, passes_s, crashes_s, _ = evaluate(env, scratch.greedy)
+    ret_s, passes_s, crashes_s, _ = evaluate(env, scratch.eval_policy())
     print(f"  RTRRL from scratch, same total budget       "
           f"return {ret_s:7.1f}  passes {passes_s:4.1f}  crashes {crashes_s:.0%}")
     return dict(expert=ret, cloned=ret_bc, finetuned=ret_ft, scratch=ret_s)

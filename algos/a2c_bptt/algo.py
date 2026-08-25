@@ -170,3 +170,24 @@ class A2CBPTT:
         with torch.no_grad():
             self.h = self.cell(self._input(obs, prev_a, prev_r), self.h)
             return int(self.actor(self.h).argmax().item())
+
+    def eval_policy(self):
+        """Same contract as the online agents -- see ``RTRRL.eval_policy``."""
+        agent = self
+
+        class _Greedy:
+            def reset(self):
+                agent.h = torch.zeros(agent.cell.n, device=agent.device)
+                self.prev_a, self.prev_r = None, 0.0
+
+            def observe(self, reward):
+                self.prev_r = float(reward)
+
+            def __call__(self, obs):
+                a = agent.greedy(obs, self.prev_a, self.prev_r)
+                self.prev_a = a
+                return a
+
+        pol = _Greedy()
+        pol.reset()
+        return pol

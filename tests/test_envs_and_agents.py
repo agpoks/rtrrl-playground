@@ -76,7 +76,7 @@ def test_agents_train_and_evaluate(algo):
     env = make_env("lanekeep")
     agent = load_algo(algo)(env.obs_dim, env.action_space, seed=0)
     train(env, agent, 400, progress=False, seed=0)
-    ev = rollout(env, agent.greedy, n_episodes=2, seed=1)
+    ev = rollout(env, agent.eval_policy(), n_episodes=2, seed=1)
     assert len(ev["returns"]) == 2
 
 

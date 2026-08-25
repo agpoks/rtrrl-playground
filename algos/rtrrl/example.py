@@ -83,11 +83,8 @@ def report(args, env, agent, out, tag: str) -> None:
     tail = returns[-args.eval_episodes:] if len(returns) else np.array([np.nan])
     final = float(np.mean(tail))
 
-    def greedy(obs):
-        return agent.greedy(obs)
-
     if args.render and hasattr(env, "render_rollout"):
-        ev = rollout(env, greedy, n_episodes=1, seed=10_000, keep_history=True)
+        ev = rollout(env, agent.eval_policy(), n_episodes=1, seed=10_000, keep_history=True)
         path = outdir / f"{tag}_{args.env}_{args.cell}_{args.estimator}.png"
         env.render_rollout(ev["history"], str(path),
                            title=f"{tag} / {args.env} / {args.cell} / {args.estimator}")

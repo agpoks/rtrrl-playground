@@ -56,15 +56,28 @@ ACLambda = load_algo("ac_lambda")
 # %%
 env = make_env("overtake")
 obs = env.reset(seed=2)
-for _ in range(40):
+# Drive straight until a beam comes back flagged as a car. Across resets: the
+# ego may well leave the track before it catches anyone, and the first
+# observation of an episode that has just ended is all zeros, which is exactly
+# the kind of thing that turns a demonstration into a confusing traceback.
+seen = None
+for _ in range(2000):
     obs, r, term, trunc, info = env.step(5)  # straight, full throttle
-    if (obs[9:18] > 0.5).any():
+    if not (term or trunc) and (obs[9:18] > 0.5).any():
+        seen = obs
         break
-print("  beams (range, right -> left):", np.round(obs[:9], 2))
-print("  is-a-car flags:              ", obs[9:18].astype(int))
-print(f"  the flagged return is a car at {obs[:9][obs[9:18] > 0.5].min() * 5:.1f} m;")
-print(f"  its speed -- {env._opp_v.min():.2f} m/s -- is not in the observation, "
-      "and never will be.")
+    if term or trunc:
+        obs = env.reset()
+
+if seen is None:
+    print("  (drove 2000 steps without meeting traffic -- try another seed)")
+else:
+    print("  beams (range, right -> left):", np.round(seen[:9], 2))
+    print("  is-a-car flags:              ", seen[9:18].astype(int))
+    print(f"  the flagged return is a car at "
+          f"{seen[:9][seen[9:18] > 0.5].min() * 5:.1f} m;")
+    print(f"  its speed -- {env._opp_v.min():.2f} m/s -- is not in the observation, "
+          "and never will be.")
 
 # %% [markdown]
 # ## Reference points
@@ -104,7 +117,7 @@ def main(argv=None):
         e = make_env("overtake")
         agent = algo(e.obs_dim, e.action_space, cell=cell, seed=args.seed)
         out = train(e, agent, args.steps, progress=False, seed=args.seed)
-        ev = rollout(e, agent.greedy, n_episodes=20, seed=700, keep_history=True)
+        ev = rollout(e, agent.eval_policy(), n_episodes=20, seed=700, keep_history=True)
         passes = np.mean([i.get("overtakes", 0) for i in ev["infos"]])
         crashes = np.mean([bool(i.get("crashed")) for i in ev["infos"]])
         rows.append((label, float(ev["returns"].mean()), passes, crashes, out["curve"]))

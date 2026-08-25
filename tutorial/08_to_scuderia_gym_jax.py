@@ -119,7 +119,7 @@ def main(argv=None):
 
     outdir = ROOT / "runs"
     outdir.mkdir(exist_ok=True)
-    ev = rollout(env, agent.greedy, n_episodes=1, seed=999, keep_history=True)
+    ev = rollout(env, agent.eval_policy(), n_episodes=1, seed=999, keep_history=True)
     env.render_rollout(ev["history"], str(outdir / f"lesson08_{args.model}_{args.map_name}.png"),
                        title=f"RTRRL / {args.cell} on scuderia_gym_jax / {args.model}")
     print(f"  wrote runs/lesson08_{args.model}_{args.map_name}.png")

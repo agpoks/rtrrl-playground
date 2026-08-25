@@ -60,12 +60,12 @@ def run_one(job):
         else:
             agent = cls(env.obs_dim, env.action_space, seed=seed, **{**DEFAULTS, **kw})
         out = train(env, agent, steps, progress=False, seed=seed)
-        ev = rollout(env, agent.greedy, n_episodes=20, seed=10_000 + seed)
+        ev = rollout(env, agent.eval_policy(), n_episodes=20, seed=10_000 + seed)
         return dict(name=name, seed=seed, status="ok",
                     params=int(agent.n_params), time_s=float(out["train_time_s"]),
                     final=float(ev["returns"].mean()),
-                    influence=int(getattr(agent, "cell", None).influence_bytes())
-                    if hasattr(agent, "cell") else 0,
+                    influence=int(getattr(getattr(agent, "cell", None),
+                                                  "influence_bytes", lambda: 0)()),
                     passes=float(np.mean([i.get("overtakes", 0) for i in ev["infos"]])),
                     crashes=float(np.mean([bool(i.get("crashed")) for i in ev["infos"]])))
     except Exception as exc:

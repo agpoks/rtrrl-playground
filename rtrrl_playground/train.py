@@ -82,11 +82,19 @@ def train(env, agent, total_steps: int, log_every: int = 5000, seed: int = 0,
 def rollout(env, policy, n_episodes: int = 10, seed: int = 0, keep_history: bool = False):
     """Evaluate ``policy`` for ``n_episodes`` without learning.
 
-    ``policy`` is anything callable on an observation; if it has ``reset`` (the
-    scripted policies do, and so does a recurrent agent) it is called at every
-    episode boundary. Forgetting that reset is how a recurrent policy ends up
-    being evaluated with a hidden state left over from the previous episode,
-    which flatters it on the first episode and punishes it on all the others.
+    ``policy`` is anything callable on an observation, with two optional hooks
+    that this loop calls if they exist:
+
+    ``policy.reset()``
+        at every episode boundary. Forgetting it is how a recurrent policy ends
+        up evaluated with a hidden state left over from the previous episode.
+    ``policy.observe(reward)``
+        after every step. A meta-RL agent takes the previous reward as an
+        *input*; evaluating it with that input pinned to zero is evaluating a
+        different network.
+
+    ``agent.eval_policy()`` returns an object with both. The scripted policies
+    in ``envs/scripted.py`` have ``reset`` and do not need ``observe``.
     """
     returns, lengths, infos, history = [], [], [], None
     for ep in range(n_episodes):
@@ -96,6 +104,8 @@ def rollout(env, policy, n_episodes: int = 10, seed: int = 0, keep_history: bool
         R, n, info = 0.0, 0, {}
         for _ in range(env.max_steps):
             obs, r, terminated, truncated, info = env.step(policy(obs))
+            if hasattr(policy, "observe"):
+                policy.observe(r)
             R += r
             n += 1
             if terminated or truncated:

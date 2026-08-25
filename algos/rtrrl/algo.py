@@ -301,10 +301,54 @@ class RTRRL:
 
     # -- evaluation -------------------------------------------------------
     def greedy(self, obs: np.ndarray, prev_a=None, prev_r: float = 0.0):
-        """Act without learning, for evaluation rollouts."""
+        """One greedy action, advancing the recurrent state. Stateless caller.
+
+        Prefer :meth:`eval_policy` for anything more than a single step --
+        this signature makes the caller responsible for threading the previous
+        action and reward back in, and a caller that forgets (they all forget)
+        evaluates a meta-RL agent with its meta-inputs pinned to zero.
+        """
         self.h = self.cell.step(self._input(obs, prev_a, prev_r))
         if isinstance(self.actor, GaussianHead):
             mu = self.actor.theta @ self.h + self.actor.bias
             return np.clip(mu, self.actor.low, self.actor.high)
         pi = self.actor.act(self.h, self.rng)[1]
         return int(np.argmax(pi))
+
+    def eval_policy(self):
+        """A greedy policy for :func:`~rtrrl_playground.train.rollout`.
+
+        Evaluating a recurrent, meta-RL agent correctly needs two things that
+        a plain ``policy(obs)`` callable cannot do, and getting either wrong
+        changes the number without changing anything visible:
+
+        * the recurrent state must be **reset at every episode boundary**,
+          or episode two starts with episode one's state still in it; and
+        * the **previous action and reward have to be fed back in**, because
+          they are inputs the network was trained with. Pinning them to zero
+          at evaluation time is evaluating a different network.
+
+        So this returns a small stateful object with ``reset()`` and
+        ``observe(reward)`` hooks, which ``rollout`` calls at the right moments.
+        """
+        return _GreedyPolicy(self)
+
+
+class _GreedyPolicy:
+    """Stateful greedy wrapper -- see :meth:`RTRRL.eval_policy`."""
+
+    def __init__(self, agent: "RTRRL"):
+        self.agent = agent
+        self.reset()
+
+    def reset(self) -> None:
+        self.agent.cell.reset_state()
+        self.prev_a, self.prev_r = None, 0.0
+
+    def observe(self, reward: float) -> None:
+        self.prev_r = float(reward)
+
+    def __call__(self, obs):
+        a = self.agent.greedy(obs, self.prev_a, self.prev_r)
+        self.prev_a = a
+        return a
