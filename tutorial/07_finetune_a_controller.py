@@ -111,8 +111,7 @@ def main(argv=None):
     print(f"  expert (scripted)            return {ret:7.1f}  passes {passes:4.1f}  "
           f"crashes {crashes:.0%}")
 
-    agent = RTRRL(env.obs_dim, env.action_space, cell=args.cell, lr_actor=1e-3,
-                  lr_critic=0.1, lr_rnn=1e-3, entropy_coef=0.03, seed=args.seed)
+    agent = RTRRL(env.obs_dim, env.action_space, cell=args.cell, seed=args.seed)
     agreement = clone(agent, env, Overtaker(), args.bc_steps)
     ret_bc, passes_bc, crashes_bc, ev_bc = evaluate(env, agent.greedy)
     print(f"  after cloning ({args.bc_steps:,} steps, agreement {agreement:.0%}) "
@@ -129,8 +128,7 @@ def main(argv=None):
                        title=f"after RTRRL fine-tuning ({args.cell})")
 
     # The control: the same total budget, spent entirely on RL from scratch.
-    scratch = RTRRL(env.obs_dim, env.action_space, cell=args.cell, lr_actor=1e-3,
-                    lr_critic=0.1, lr_rnn=1e-3, entropy_coef=0.03, seed=args.seed)
+    scratch = RTRRL(env.obs_dim, env.action_space, cell=args.cell, seed=args.seed)
     train(env, scratch, args.bc_steps + args.rl_steps, progress=False, seed=args.seed)
     ret_s, passes_s, crashes_s, _ = evaluate(env, scratch.greedy)
     print(f"  RTRRL from scratch, same total budget       "

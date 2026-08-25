@@ -22,6 +22,7 @@ estimators
 environments
 tutorial
 benchmarks
+benchmark_results
 to_scuderia_gym_jax
 papers
 ```

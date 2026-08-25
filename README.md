@@ -94,6 +94,25 @@ rtrrl-playground/
 └── docs/               Sphinx / Read the Docs source
 ```
 
+## What it looks like when it works
+
+MemoryChain-8, the pure memory test: optimal is `+1.0`, guessing is `0.0`, and
+a memoryless policy provably cannot beat guessing.
+
+| agent | final return (3 seeds) |
+|---|---|
+| RTRRL / **`lrcu`** (liquid resistance + capacitance) | **+0.94** |
+| RTRRL / `ligru` | +0.88 |
+| RTRRL / `ctrnn` (RTRRL's own cell) | +0.26 |
+| AC(λ), memoryless | −0.01 |
+
+The liquid cell winning is not a thumb on the scale: it is the cell the RTRRL
+authors found works best on real hardware
+([arXiv:2602.02236](https://arxiv.org/abs/2602.02236)), and the same ordering
+falling out of an independent reimplementation on a task neither paper used is
+about as good as this kind of agreement gets. Full tables, including the ones
+that are less flattering, in [`docs/source/benchmark_results.md`](docs/source/benchmark_results.md).
+
 ## Honest notes
 
 Three things this repo says that a results table would not:
@@ -105,7 +124,13 @@ Three things this repo says that a results table would not:
 * **`lanekeep` does not need memory.** Nine beams are a lot of information,
   and a memoryless policy drives it about as well as a hand-written
   wall-follower. That is in the benchmark table rather than quietly omitted.
-  `overtake` is where memory earns its keep.
+  `overtake` and `memory-chain` are where memory earns its keep.
+* **The frozen-reservoir ablation is competitive.** On `lanekeep`, not
+  training the recurrent weights at all beats training them with RFLO at
+  several settings. The scope of that claim -- and the three explanations
+  worth separating -- is
+  [spelled out](algos/rtrrl/README.md#an-uncomfortable-measurement) rather
+  than buried.
 * **This is a reimplementation for taking apart, not a reproduction.** The
   numbers here are on this repo's own small environments, not the paper's
   benchmark suite. For the authors' code and results, follow the arXiv links

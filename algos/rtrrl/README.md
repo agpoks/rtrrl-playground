@@ -77,12 +77,37 @@ trust either set of numbers.
 | `alpha_C` (critic) | 1.0 | 1.0, but **normalised** by ‖φ‖² | The Dutch trace is stable only while `alpha * ‖φ‖² ≤ 1`. With `n` tanh units, `‖φ‖²` starts near 1 (the state is zero, only the bias feature is on) and drifts towards `n` as the state fills out — so 1.0 is fine for a few hundred steps and then diverges. Dividing by `‖φ‖²` pins that product at `alpha_C` forever. `--critic-lr-mode fixed` restores the literal reading. |
 | `alpha_A` (actor) | 1e-2 | 1e-3 | Measured, not guessed: see the sweep in [`benchmarks/`](../../benchmarks). At 1e-2 the actor outruns the critic, the persistent early TD-error bias locks the policy onto whichever action it happened to prefer, and the entropy is gone inside a thousand steps. Two-timescale — critic fast, actor slow — is the difference between learning and not. |
 | `eta_H` (entropy) | 1e-5 | 3e-2 | The same failure from the other side. The entropy bonus is what keeps the policy alive long enough for the critic to become worth listening to. |
+| `alpha_R` (recurrent) | 1e-3 | 1e-5 | The largest single effect measured here, and the most surprising. On `lanekeep`, dropping the recurrent learning rate by two orders of magnitude roughly triples the final return; at 1e-3 most seeds collapse. The plausible reading is that a δ-modulated *biased* gradient moves the critic's own features under it, and the two-timescale separation that fixes the actor/critic interaction has no equivalent for the cell. See the note below. |
+| recurrent init gain | `1/sqrt(n)` | `0.2/sqrt(n)` | Until the cell has learned something, a strongly-driven recurrent block is mostly recycled noise the heads have to see through. |
 | critic update | Algorithm 1 as printed | full true-online TD(λ) | Algorithm 1 writes `θ_C ← θ_C + δ e_C + α(v − θ_C·h)h`, which is true-online TD(λ) minus its `(v − v_old)e` term. Both are here; `--critic-update paper` gives the printed one. |
 
 One structural deviation as well: the paper's loop draws its first action from
 `h = 0`, before the first observation has been fed in, so `o_0` is never seen.
 Here the cell consumes `o_0` first and acts from `h_0`. Same algorithm, one
 fewer wasted step.
+
+## An uncomfortable measurement
+
+On `lanekeep`, at 300k steps, the **frozen-reservoir ablation**
+(`--estimator none`, so the recurrent weights never move and only the heads
+learn) scores above several configurations in which they do. So does the
+memoryless control. That is reproducible here across seeds and it is in the
+benchmark table rather than omitted.
+
+What it is *not* is a refutation of the paper. The honest scope: on **these**
+environments, at **these** budgets, with **this** reimplementation, training
+the recurrence with RFLO is not paying for itself, and two of the three
+obvious explanations are about this repo rather than about RTRRL —
+
+* `lanekeep` may simply not need memory (the memoryless control does about as
+  well, which is the other half of the same measurement); and
+* 300k steps at batch size one is a very short run for a biased gradient with
+  no batch to average over.
+
+The third explanation would be about the algorithm, and distinguishing them is
+exactly what `benchmarks/sweep.py` is for. `overtake` and `memory-chain` — the
+two environments where a memoryless policy provably cannot win — are where to
+look first.
 
 ## What it is not
 

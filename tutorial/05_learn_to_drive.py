@@ -24,8 +24,15 @@ out how fast it is going from how the beams are changing.
 #   way you point, and nothing about how fast you are arriving.
 #
 # Three reference points to keep the numbers honest: a hand-written
-# wall-follower scores about **573**, a random policy about **23**, and the
-# theoretical ceiling is 1.0 per step, so **600** over a 600-step episode.
+# wall-follower scores about **575**, a random policy about **23**, and the
+# ceiling is 1.0 per step, so **600** over a 600-step episode.
+#
+# And one warning, because the point of this repo is not to flatter the
+# algorithm: **this task does not actually need memory.** The memoryless
+# control is in the comparison below and does about as well. Nine beams are a
+# lot of information, and reacting to the forward one is a decent speed
+# controller by itself. Lesson 5 is where you check that an agent can drive at
+# all; lesson 6 is where the memory has to do work.
 
 # %%
 import argparse
@@ -90,8 +97,7 @@ print(f"  scripted wall-follower {score(WallFollower())[0]:7.1f}")
 # %%
 def run(cell, steps, seed=0, algo=RTRRL, **kw):
     e = make_env("lanekeep")
-    agent = algo(e.obs_dim, e.action_space, cell=cell, lr_actor=1e-3, lr_critic=0.1,
-                 lr_rnn=1e-3, entropy_coef=0.03, seed=seed, **kw)
+    agent = algo(e.obs_dim, e.action_space, cell=cell, seed=seed, **kw)
     out = train(e, agent, steps, progress=False, seed=seed)
     return agent, e, out
 
@@ -135,7 +141,7 @@ def plot(curves, path):
         xs = [c[0] for c in curve]
         ys = [c[1] for c in curve]
         ax.plot(xs, ys, label=label)
-    ax.axhline(573, color="tab:green", ls="--", lw=1, label="scripted wall-follower")
+    ax.axhline(575, color="tab:green", ls="--", lw=1, label="scripted wall-follower")
     ax.axhline(23, color="0.6", ls=":", lw=1, label="random")
     ax.set_xlabel("environment steps")
     ax.set_ylabel("return (20-episode mean)")

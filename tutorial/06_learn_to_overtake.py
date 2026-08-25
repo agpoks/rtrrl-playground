@@ -102,8 +102,7 @@ def main(argv=None):
     for label, cell, algo in ([("memoryless control", "mlp", ACLambda)]
                               + [(f"RTRRL / {c}", c, RTRRL) for c in args.cells]):
         e = make_env("overtake")
-        agent = algo(e.obs_dim, e.action_space, cell=cell, lr_actor=1e-3, lr_critic=0.1,
-                     lr_rnn=1e-3, entropy_coef=0.03, seed=args.seed)
+        agent = algo(e.obs_dim, e.action_space, cell=cell, seed=args.seed)
         out = train(e, agent, args.steps, progress=False, seed=args.seed)
         ev = rollout(e, agent.greedy, n_episodes=20, seed=700, keep_history=True)
         passes = np.mean([i.get("overtakes", 0) for i in ev["infos"]])
@@ -126,7 +125,7 @@ def plot(rows, path):
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
     for label, _ret, _p, _c, curve in rows:
         ax.plot([c[0] for c in curve], [c[1] for c in curve], label=label)
-    ax.axhline(406, color="tab:green", ls="--", lw=1, label="scripted overtaker")
+    ax.axhline(313, color="tab:green", ls="--", lw=1, label="scripted overtaker")
     ax.set_xlabel("environment steps")
     ax.set_ylabel("return (20-episode mean)")
     ax.set_title("Learning to overtake without a closing-rate sensor")

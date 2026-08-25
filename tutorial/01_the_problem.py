@@ -67,19 +67,30 @@ print(f"  the bit to remember was {info['bit']}; reward at the end was {r:+.0f}"
 # of a recurrent state.
 
 # %%
-def run(agent_cls, env_id, steps=60_000, seed=0, **env_kw):
+def run(agent_cls, env_id, steps=60_000, seed=0, agent_kw=None, **env_kw):
     env = make_env(env_id, **env_kw)
-    agent = agent_cls(env.obs_dim, env.action_space, lr_actor=1e-3, lr_critic=0.1,
-                      lr_rnn=1e-3, entropy_coef=0.03, seed=seed)
+    # No hyperparameters here on purpose beyond the cell: both agents take the
+    # library defaults, so the only difference between the rows is the memory.
+    agent = agent_cls(env.obs_dim, env.action_space, seed=seed, **(agent_kw or {}))
     out = train(env, agent, steps, progress=False, seed=seed)
     rets = out["returns"]
     return float(rets[-len(rets) // 5:].mean()), len(rets)
 
 
-for name, cls in (("memoryless AC(lambda)", ACLambda), ("RTRRL (recurrent)", RTRRL)):
-    score, n_eps = run(cls, "memory-chain", steps=60_000, length=8)
-    print(f"  {name:<24} MemoryChain-8: mean return over the last fifth "
+# `cell="lrcu"` for the recurrent row, and it is worth saying why rather than
+# quietly picking the winner: on this task the choice of recurrent unit matters
+# more than anything else in the agent. A liquid-resistance liquid-capacitance
+# cell gets to about +0.94 of the available +1.0; a plain CT-RNN gets to about
+# +0.26 and is wildly seed-dependent. The full table is in the benchmarks; the
+# point of this lesson is the row below it.
+for name, cls, kw in (("memoryless AC(lambda)", ACLambda, {}),
+                      ("RTRRL (recurrent, lrcu)", RTRRL, {"cell": "lrcu"})):
+    score, n_eps = run(cls, "memory-chain", steps=200_000, agent_kw=kw, length=8)
+    print(f"  {name:<26} MemoryChain-8: mean return over the last fifth "
           f"= {score:+.3f}   ({n_eps} episodes)")
+print("  (optimal is +1.000; a policy that guesses scores 0.000, and a memoryless")
+print("   one cannot do better than guess -- at the moment it is asked, the")
+print("   observation is identical whichever bit it saw.)")
 
 # %% [markdown]
 # ## The same point on something that drives
@@ -113,7 +124,7 @@ for mode in ("full", "vel"):
 # %%
 score, n_eps = run(ACLambda, "lanekeep", steps=60_000)
 print(f"  memoryless AC(lambda) on lanekeep: return = {score:7.1f} over {n_eps} episodes")
-print("  (for scale: a scripted wall-follower gets ~573, and crashing early gets ~30)")
+print("  (for scale: a scripted wall-follower gets ~575, and crashing early gets ~30)")
 
 # %% [markdown]
 # ## Where this goes
