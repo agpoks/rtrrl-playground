@@ -50,6 +50,13 @@ python scripts/make_notebooks.py     # regenerate the .ipynb versions
 Lessons 1-4 take a couple of minutes each; 5-7 are training runs and take
 longer. All of them take `--steps`.
 
+## Data
+
+Nothing downloads. Three of the four environments generate their own data by
+being simulated, and real recordings are yours to supply -- see
+[`datasets/README.md`](https://github.com/agpoks/rtrrl-playground/blob/main/datasets/README.md)
+and {doc}`real_data`.
+
 ## Compare things
 
 ```bash

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/source/_static/logo-banner.svg" alt="rtrrl-playground" width="560">
+</p>
+
 # rtrrl-playground
 
 A tutorial playground for **learning while you drive**: reinforcement learning
@@ -92,6 +96,7 @@ rtrrl-playground/
 ├── algos/<name>/       algo.py, example.py, README.md  (one per algorithm)
 ├── rtrrl_playground/   shared: envs, cells, heads, traces, training loop
 ├── benchmarks/         YAML suites, and the parallel sweep runner
+├── datasets/           where the data comes from (nothing ships; see the note)
 ├── papers/             every reference, and why it is here
 └── docs/               Sphinx / Read the Docs source
 ```

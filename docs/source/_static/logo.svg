@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="rtrrl-playground logo">
+  <defs>
+    <linearGradient id="rt" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#e11d48"/>
+    </linearGradient>
+    <radialGradient id="rtsheen" cx="32%" cy="22%" r="68%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="rtarrow" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#ffffff" fill-opacity="0.92"/>
+    </marker>
+  </defs>
+
+  <rect x="14" y="14" width="172" height="172" rx="46" fill="url(#rt)"/>
+  <rect x="14" y="14" width="172" height="172" rx="46" fill="url(#rtsheen)"/>
+
+  <!-- the recurrence, unrolled left to right: time runs forwards, and so does
+       the gradient. Each unit keeps a self-loop; nothing points backwards. -->
+  <g fill="none" stroke="#ffffff" stroke-opacity="0.92" stroke-width="4" stroke-linecap="round">
+    <path d="M65,74 L86,74" marker-end="url(#rtarrow)"/>
+    <path d="M113,74 L134,74" marker-end="url(#rtarrow)"/>
+    <path d="M41,62 C41,44 63,44 63,62" stroke-opacity="0.55" stroke-width="3.4"/>
+    <path d="M89,62 C89,44 111,44 111,62" stroke-opacity="0.55" stroke-width="3.4"/>
+    <path d="M137,62 C137,44 159,44 159,62" stroke-opacity="0.55" stroke-width="3.4"/>
+  </g>
+  <g fill="#ffffff">
+    <circle cx="52" cy="74" r="13"/>
+    <circle cx="100" cy="74" r="13"/>
+    <circle cx="148" cy="74" r="13"/>
+  </g>
+
+  <!-- the eligibility trace: one number per parameter, decaying, reaching back -->
+  <g fill="#ffffff" fill-opacity="0.85">
+    <rect x="42" y="118" width="12" height="36" rx="5"/>
+    <rect x="60" y="126" width="12" height="28" rx="5" fill-opacity="0.72"/>
+    <rect x="78" y="132" width="12" height="22" rx="5" fill-opacity="0.60"/>
+    <rect x="96" y="137" width="12" height="17" rx="5" fill-opacity="0.48"/>
+    <rect x="114" y="141" width="12" height="13" rx="5" fill-opacity="0.38"/>
+    <rect x="132" y="144" width="12" height="10" rx="5" fill-opacity="0.28"/>
+    <rect x="150" y="146" width="12" height="8" rx="5" fill-opacity="0.20"/>
+  </g>
+</svg>
