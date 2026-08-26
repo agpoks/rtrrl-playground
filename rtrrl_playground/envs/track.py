@@ -58,6 +58,7 @@ class Track:
         # allocation dominates the actual geometry.
         self._offsets: dict[int, np.ndarray] = {}
         self._ray_t: dict[tuple, np.ndarray] = {}
+        self._nidx: np.ndarray | None = None
 
     # -- rasterisation ----------------------------------------------------
     def _build_grid(self, res: float, margin: float) -> None:
@@ -79,6 +80,17 @@ class Track:
         free[jj, ii] = True
         self.free = free
 
+    def grid_index(self, x, y):
+        """World coordinates -> clipped ``(i, j)`` bitmap indices.
+
+        Exposed because the safety filter needs *both* the occupancy bit and
+        the nearest-centreline index for the same points, and converting the
+        coordinates twice was, measured, a third of its cost.
+        """
+        i = ((x - self.origin[0]) / self.res).astype(np.int32).clip(0, self.nx - 1)
+        j = ((y - self.origin[1]) / self.res).astype(np.int32).clip(0, self.ny - 1)
+        return i, j
+
     def on_track(self, x, y) -> np.ndarray:
         """Bitmap membership test. Vectorised over any shape of ``x``, ``y``.
 
@@ -88,6 +100,47 @@ class Track:
         i = ((x - self.origin[0]) / self.res).astype(np.int32).clip(0, self.nx - 1)
         j = ((y - self.origin[1]) / self.res).astype(np.int32).clip(0, self.ny - 1)
         return self.free[j, i]
+
+    def nearest_index(self, x, y) -> np.ndarray:
+        """Nearest centreline sample for points, in O(1). ``-1`` when far away.
+
+        A cached lookup grid, built the same way as the occupancy bitmap: stamp
+        a disc around each centreline sample and keep, per cell, the sample it
+        is closest to. Cells further from the line than the disc radius keep
+        ``-1``, which is a useful answer rather than a missing one -- anything
+        that far out is off the track by construction.
+
+        This exists for the predictive safety filter in
+        :mod:`rtrrl_playground.safety`, which projects nine candidate
+        trajectories over a 24-step horizon at every control tick. Done with a
+        search over the centreline that is ~60k distance computations per tick
+        and dominates everything; done with this it is an array index.
+        """
+        if self._nidx is None:
+            self._build_nearest_grid()
+        i = ((np.asarray(x) - self.origin[0]) / self.res).astype(np.int32).clip(0, self.nx - 1)
+        j = ((np.asarray(y) - self.origin[1]) / self.res).astype(np.int32).clip(0, self.ny - 1)
+        return self._nidx[j, i]
+
+    def _build_nearest_grid(self, pad: float = 1.0) -> None:
+        rr = int(np.ceil((self.half_width + pad) / self.res))
+        oy, ox = np.mgrid[-rr:rr + 1, -rr:rr + 1]
+        disc = (ox ** 2 + oy ** 2) * self.res ** 2 <= (self.half_width + pad) ** 2
+        oy, ox = oy[disc], ox[disc]
+        best_d2 = np.full((self.ny, self.nx), np.inf)
+        best_k = np.full((self.ny, self.nx), -1, dtype=np.int32)
+        ci = ((self.cx - self.origin[0]) / self.res).astype(np.int32)
+        cj = ((self.cy - self.origin[1]) / self.res).astype(np.int32)
+        for k in range(self.K):
+            jj = np.clip(cj[k] + oy, 0, self.ny - 1)
+            ii = np.clip(ci[k] + ox, 0, self.nx - 1)
+            px = self.origin[0] + ii * self.res
+            py = self.origin[1] + jj * self.res
+            d2 = (px - self.cx[k]) ** 2 + (py - self.cy[k]) ** 2
+            better = d2 < best_d2[jj, ii]
+            best_d2[jj[better], ii[better]] = d2[better]
+            best_k[jj[better], ii[better]] = k
+        self._nidx = best_k
 
     # -- projection -------------------------------------------------------
     def nearest(self, x: float, y: float) -> int:

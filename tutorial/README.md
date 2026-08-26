@@ -16,6 +16,7 @@ the one you want.
 | 7 | [`07_finetune_a_controller.py`](07_finetune_a_controller.py) | Clone a controller offline, then improve it online while driving — the deployment story from Lemmel et al. (2026), in miniature. | ~15 min |
 | 8 | [`08_to_scuderia_gym_jax.py`](08_to_scuderia_gym_jax.py) | Swap the toy vehicle for `scuderia_gym_jax`'s real ST/STD models, and what changes when you do. | varies |
 | 9 | [`09_clone_from_a_real_bag.py`](09_clone_from_a_real_bag.py) | Clone a real driver from a ROS 2 recording, and rebuild the circuit it was recorded on. Needs `--bag`; no data ships here. | ~5 min |
+| 10 | [`10_safety_filter.py`](10_safety_filter.py) | A predictive safety filter from scratch: never leave the track while learning, and what that costs. | ~10 min |
 
 Every lesson takes `--help`. Runtimes are for a laptop CPU at the default
 `--steps`; all of them take a smaller number.
@@ -31,3 +32,5 @@ Every lesson takes `--help`. Runtimes are for a laptop CPU at the default
 5. It drives (5), it overtakes (6), and the way you would actually deploy it
    is to fine-tune something that already works (7).
 6. Then move it onto real vehicle dynamics (8), and onto real recorded data (9).
+7. And if it is going to learn on a real vehicle, it must not crash it while
+   learning (10).

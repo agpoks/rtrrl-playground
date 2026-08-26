@@ -103,6 +103,21 @@ Averaging a few hundred UORO samples of the *same* gradient takes its alignment
 towards 1; RFLO's 0.72 does not improve with any number of samples. See
 {doc}`estimators`.
 
+## With a safety filter
+
+RTRRL on `lanekeep`, 200k steps, 4 seeds — see {doc}`safety`.
+
+| filter | eval return | crashes **during training** | crashes at eval | steps overridden |
+|---|---|---|---|---|
+| none | 428 ± 97 | 61.3% | 30.0% | — |
+| `assumed_grip=1.0` (default), `credit=executed` | 354 ± 136 | 21.3% | 6.2% | 15.8% |
+| `assumed_grip=1.0`, `credit=proposed` | 356 ± 216 | 20.6% | 13.8% | 30.7% |
+| **`assumed_grip=0.6` (worst case)** | **449 ± 155** | **0.0%** | **0.0%** | 17.5% |
+| `assumed_grip=1.4` (optimistic) | 329 ± 53 | 60.8% | 51.2% | 7.8% |
+
+The worst-case filter crashed zero times in 200k steps of learning and still
+finished with the highest return. The optimistic one is worse than no filter.
+
 ## Reproducing
 
 ```bash
@@ -110,6 +125,7 @@ python benchmarks/sweep.py --env memory-chain --grid cells --steps 200000 --seed
 python benchmarks/sweep.py --env lanekeep --grid cells --steps 300000 --seeds 4
 python benchmarks/sweep.py --env lanekeep --grid estimators --steps 300000 --seeds 4
 python benchmarks/run_suite.py --config benchmarks/configs/driving.yaml
+python tutorial/10_safety_filter.py --steps 200000 --seeds 4
 ```
 
 Each of those is a few minutes on 15 cores.

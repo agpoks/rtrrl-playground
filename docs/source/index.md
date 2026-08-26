@@ -20,6 +20,7 @@ the_algorithm
 cells
 estimators
 environments
+safety
 real_data
 tutorial
 benchmarks

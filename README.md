@@ -39,6 +39,7 @@ matching notebook:
 | 7 | [Fine-tune a controller](tutorial/07_finetune_a_controller.py) | Clone offline, improve online while driving -- the deployment story from Lemmel et al. (2026). |
 | 8 | [Onto `scuderia_gym_jax`](tutorial/08_to_scuderia_gym_jax.py) | Swap the toy bicycle for real ST/STD vehicle models, and what changes when you do. |
 | 9 | [Clone from a real bag](tutorial/09_clone_from_a_real_bag.py) | Clone a real driver from a ROS 2 recording, and rebuild the circuit it was recorded on. |
+| 10 | [Safety filter](tutorial/10_safety_filter.py) | A predictive safety filter from scratch: never leave the track *while learning*, and what that costs. |
 
 ## What is in the box
 
@@ -136,6 +137,55 @@ Three things this repo says that a results table would not:
   numbers here are on this repo's own small environments, not the paper's
   benchmark suite. For the authors' code and results, follow the arXiv links
   in [`papers/README.md`](papers/README.md).
+
+## Learning without crashing
+
+`rtrrl_playground/safety.py` is a **predictive safety filter**
+([Wabersich & Zeilinger, Automatica 2021](https://arxiv.org/abs/1812.05506)),
+written from scratch. Before an action reaches the actuator it asks one
+question: *if I apply this, does a safe backup plan still exist afterwards?*
+Yes → apply it untouched. No → apply the nearest action for which one does.
+The terminal set is "stopped, and on the track", and the backup is full braking
+with the steering pointed back at the centreline.
+
+```bash
+python tutorial/10_safety_filter.py
+```
+
+| policy | off-track | return | filtered |
+|---|---|---|---|
+| random | **100%** | 14 | — |
+| random + filter | **0%** | 15 | 16.4% |
+| wall-follower | 0% | 569 | — |
+| wall-follower + filter | 0% | **569** | **0.0%** |
+
+Both halves matter. The filter takes the worst possible policy from crashing
+every episode to never crashing — and it is *invisible* to a competent one, at
+0% interventions and an unchanged return. A filter that intervenes constantly
+on a good policy is not a safety filter, it is a controller, and you are
+training against it rather than against the task.
+
+And with RTRRL learning behind it on `lanekeep` (200k steps, 4 seeds), the
+number that matters is crashes **while learning**:
+
+| filter | eval return | crashes **during training** | crashes at eval | steps overridden |
+|---|---|---|---|---|
+| none | 428 ± 97 | 61.3% | 30.0% | — |
+| `assumed_grip=1.0` (default), `credit=executed` | 354 ± 136 | 21.3% | 6.2% | 15.8% |
+| `assumed_grip=1.0`, `credit=proposed` | 356 ± 216 | 20.6% | 13.8% | 30.7% |
+| **`assumed_grip=0.6` (worst case)** | **449 ± 155** | **0.0%** | **0.0%** | 17.5% |
+| `assumed_grip=1.4` (optimistic) | 329 ± 53 | 60.8% | 51.2% | 7.8% |
+
+The worst-case filter never crashed once in 200k steps of learning **and**
+finished with the highest return — an episode that ends in a wall is an episode
+that stopped paying. The optimistic one is worse than no filter at all. A
+safety filter inherits its guarantee from its model and nothing else.
+
+It is also honest about what it cannot do: it is privileged (it reads the
+state, not the agent's beams), it does not know the hidden grip either
+(`assumed_grip` too high and crashes happen *through* it — there is a test that
+asserts exactly that), and it makes the update off-policy in a way TD(λ) has no
+term for (`credit={executed,proposed}`, both measured).
 
 ## Real recordings
 

@@ -83,6 +83,32 @@ have produced a near-duplicate of `rflo` and obscured that.
 | 16 | van Seijen, Mahmood, Pilarski, Machado, Sutton — **True Online Temporal-Difference Learning** | JMLR 2016 | [arXiv:1512.04087](https://arxiv.org/abs/1512.04087) | `--critic-update true-online` |
 | 17 | Mnih et al. — **Asynchronous Methods for Deep Reinforcement Learning (A3C/A2C)** | ICML 2016 | [arXiv:1602.01783](https://arxiv.org/abs/1602.01783) | [`algos/a2c_bptt`](../algos/a2c_bptt) |
 
+## Safe learning
+
+| # | Paper | Year | Link | Here |
+|---|---|---|---|---|
+| 20 | Wabersich, Zeilinger — **A predictive safety filter for learning-based control of constrained nonlinear dynamical systems** | Automatica 2021 | [arXiv:1812.05506](https://arxiv.org/abs/1812.05506) | [`safety.py`](../rtrrl_playground/safety.py) |
+| 21 | Wabersich, Zeilinger — **Linear model predictive safety certification for learning-based control** | CDC 2018 | [arXiv:1803.08552](https://arxiv.org/abs/1803.08552) | the same idea, linear |
+| 22 | Hewing, Wabersich, Menner, Zeilinger — **Learning-Based Model Predictive Control: Toward Safe Learning in Control** | Annu. Rev. Control 2020 | — | the survey |
+| 23 | Ames, Coogan, Egerstedt, Notomista, Sreenath, Tabuada — **Control Barrier Functions: Theory and Applications** | ECC 2019 | [arXiv:1903.11199](https://arxiv.org/abs/1903.11199) | the alternative |
+| 24 | García, Fernández — **A Comprehensive Survey on Safe Reinforcement Learning** | JMLR 2015 | — | the field |
+
+(20) is what [`rtrrl_playground/safety.py`](../rtrrl_playground/safety.py)
+implements: rather than shaping the reward or restricting the policy class, put
+a filter between the agent and the actuator that asks one question per step --
+*does a safe backup plan still exist if I apply this?* -- and applies the
+nearest action for which the answer is yes. The learner is untouched in the
+interior and constrained only at the boundary, which is why a competent policy
+is filtered on ~0% of steps while a random one never leaves the track.
+
+**(23) is the pointwise alternative** and is deliberately not implemented here.
+A control barrier function certifies safety through a scalar function of the
+current state with no prediction at all; a predictive filter certifies it by
+exhibiting a trajectory. The trade is offline design effort (finding a valid
+CBF) against online compute (rolling out a backup), and on a task where the
+constraint is a bitmap rather than an analytic set, exhibiting the trajectory
+is much easier than finding the function.
+
 ## The environments
 
 | # | Paper | Year | Here |
