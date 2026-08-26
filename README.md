@@ -38,6 +38,7 @@ matching notebook:
 | 6 | [Learn to overtake](tutorial/06_learn_to_overtake.py) | Traffic whose closing speed no single frame contains. |
 | 7 | [Fine-tune a controller](tutorial/07_finetune_a_controller.py) | Clone offline, improve online while driving -- the deployment story from Lemmel et al. (2026). |
 | 8 | [Onto `scuderia_gym_jax`](tutorial/08_to_scuderia_gym_jax.py) | Swap the toy bicycle for real ST/STD vehicle models, and what changes when you do. |
+| 9 | [Clone from a real bag](tutorial/09_clone_from_a_real_bag.py) | Clone a real driver from a ROS 2 recording, and rebuild the circuit it was recorded on. |
 
 ## What is in the box
 
@@ -135,6 +136,30 @@ Three things this repo says that a results table would not:
   numbers here are on this repo's own small environments, not the paper's
   benchmark suite. For the authors' code and results, follow the arXiv links
   in [`papers/README.md`](papers/README.md).
+
+## Real recordings
+
+`rtrrl_playground/data/rosbag.py` reads a ROS 2 bag -- `/scan`, a drive
+command, odometry -- straight into the format the cloning stage consumes, and
+rebuilds the circuit it was recorded on: the human's driven line becomes the
+centreline and the recorded occupancy grid becomes the wall bitmap, so the
+simulated beams hit the walls the real lidar saw. Pure Python, **no ROS
+installation** (`pip install -e ".[bags]"`).
+
+On a 254 s F1TENTH recording (6375 usable demonstrations after dropping the
+stationary third), held-out agreement with the human's next command:
+
+| clone | held-out agreement |
+|---|---|
+| RTRRL / `ctrnn` | **61.5%** |
+| memoryless (`mlp`) | 57.1% |
+| RTRRL / `lrcu` | 55.4% |
+| majority-action baseline | 31.6% |
+
+The baseline to beat is the majority action, not 1/9: a driver holds one
+command for many frames, so "keep doing what you were doing" is already a
+strong guess. The recurrent clone beats the memoryless one by 4 points, which
+is the honest size of what memory buys at predicting a human here.
 
 ## Where it is going
 

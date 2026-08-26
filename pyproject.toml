@@ -17,6 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 # Only the BPTT baseline needs torch -- see README "Why NumPy".
 torch = ["torch>=2.2"]
+# Reading ROS 2 recordings. Pure Python; no ROS installation required.
+bags = ["rosbags>=0.9"]
 notebooks = ["jupyter>=1.0", "ipykernel>=6.29"]
 docs = ["sphinx>=7.2", "sphinx-rtd-theme>=2.0", "myst-parser>=2.0", "nbsphinx>=0.9", "sphinxcontrib-bibtex>=2.6"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
