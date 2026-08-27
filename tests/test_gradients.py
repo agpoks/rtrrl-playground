@@ -258,3 +258,70 @@ def test_physics_leak_is_bounded_below_one():
         worst = max(worst, float(leak[:cell.n_phys].max()))
         cell.step(x)
     assert worst < 1.0, f"physics leak reached {worst}"
+
+
+def test_hybrid_is_exact_for_the_known_block():
+    """The claim ``hybrid`` makes, and the one that makes it not-an-approximation.
+
+    Exact for the parameters of the known block; RFLO is not. If this ever
+    stops holding to machine precision the estimator has quietly become another
+    approximation and the docs overclaim.
+    """
+    def build(est):
+        return make_cell("physics_ligru", 19, 8, estimator=est, n_obs=9, n_act=9,
+                         rng=np.random.default_rng(0))
+
+    rng = np.random.default_rng(1)
+
+    def inp():
+        x = np.zeros(19)
+        x[:9] = rng.random(9)
+        x[9 + rng.integers(9)] = 1.0
+        return x
+
+    xs = [inp() for _ in range(8)]
+    cells = {e: build(e) for e in ("rtrl", "hybrid", "rflo")}
+    for c in cells.values():
+        c.reset_state()
+    for x in xs:
+        for c in cells.values():
+            c.step(x)
+
+    g = rng.normal(size=8)
+    grads = {e: c.grad(g) for e, c in cells.items()}
+    ne = cells["rtrl"].n_phys
+    assert ne == 3
+
+    scale = max(np.abs(grads["rtrl"][:ne]).max(), 1e-12)
+    err_hybrid = np.abs(grads["hybrid"][:ne] - grads["rtrl"][:ne]).max() / scale
+    err_rflo = np.abs(grads["rflo"][:ne] - grads["rtrl"][:ne]).max() / scale
+    assert err_hybrid < 1e-10, f"hybrid was not exact on the known block: {err_hybrid:.2e}"
+    assert err_rflo > 1e-3, (
+        "RFLO agreed with exact RTRL on the known block, so this test is no "
+        "longer demonstrating anything")
+
+
+def test_hybrid_degrades_to_rflo_without_a_known_block():
+    """A cell that declares no known block must get exactly RFLO."""
+    rng = np.random.default_rng(2)
+    xs = rng.normal(size=(6, 4))
+    a = make_cell("ctrnn", 4, 6, estimator="hybrid", rng=np.random.default_rng(0))
+    b = make_cell("ctrnn", 4, 6, estimator="rflo", rng=np.random.default_rng(0))
+    assert a.exact_rows == 0
+    for c in (a, b):
+        c.reset_state()
+    for x in xs:
+        a.step(x)
+        b.step(x)
+    g = rng.normal(size=6)
+    assert np.allclose(a.grad(g), b.grad(g))
+
+
+def test_hybrid_costs_less_than_exact_rtrl():
+    n, ne = 8, 3
+    sizes = {}
+    for est in ("rtrl", "hybrid", "rflo"):
+        c = make_cell("physics_ligru", 19, n, estimator=est, n_obs=9, n_act=9,
+                      rng=np.random.default_rng(0))
+        sizes[est] = c.influence_bytes()
+    assert sizes["rflo"] < sizes["hybrid"] < sizes["rtrl"], sizes

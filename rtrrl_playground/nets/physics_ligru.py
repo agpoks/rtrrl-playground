@@ -107,6 +107,19 @@ class PhysicsLiGRU(OnlineCell):
     name = "physics_ligru"
     N_PHYS = 3  # v_hat, delta_hat, yaw-rate proxy
 
+    @property
+    def exact_rows(self) -> int:
+        """The physics block is closed under the state Jacobian, so ``hybrid``
+        is exact on it -- see :meth:`OnlineCell.exact_rows`.
+
+        Closed because of how the three units are written: ``v_hat`` and
+        ``delta_hat`` read only the *command*, which arrives in the input, and
+        the yaw-rate proxy reads only those two. Nothing in the block reads a
+        learned unit, so ``D[:n_phys, n_phys:] == 0`` and there is no influence
+        path from outside to have approximated away.
+        """
+        return self.n_phys
+
     def _build(self, n_obs: int | None = None, n_act: int | None = None,
                dt: float = 0.05, vehicle: VehicleParams | None = None,
                forget_bias: float = 1.0) -> None:

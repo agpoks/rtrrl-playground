@@ -9,10 +9,24 @@ Two answers are implemented here, opposites in method: one certifies safety by
 agent identically, so they can be compared on the same task, the same nine
 actions and the same model.
 
+## Why a filter, and not one of the alternatives
 
-Learning by trial and error means, definitionally, making the errors. On a
-simulated car that is free; on a real one it is a broken car, and it is the
-single biggest reason online RL does not get deployed.
+There are four standard ways to stop an RL agent from doing something
+catastrophic, and they differ in *where they pay*.
+
+| approach | how it works | what it costs |
+|---|---|---|
+| reward shaping | a large negative reward for crashing | pays everywhere, guarantees nothing, and the agent must crash to learn it |
+| constrained policy class | parameterise so unsafe actions are unreachable | pays everywhere; usually costs the optimum too |
+| Lagrangian / CMDP | constrain the *expected* cost | a constraint in expectation is not a constraint; rare violations are allowed by construction |
+| **safety filter** | leave the policy alone, veto individual actions | pays only at the boundary; guarantees hold per-step, not in expectation |
+
+The last row is the one implemented here, twice. Its distinguishing property is
+that it is **not a learning method at all** — it makes no assumption about the
+agent, so the same filter wraps RTRRL, a wall-follower, or a uniform random
+policy, and the guarantee does not depend on which. That is also the honest
+statement of its weakness: everything it promises comes from its *model* of the
+vehicle, and nothing from the learning.
 
 `rtrrl_playground/safety.py` implements a **predictive safety filter**
 (Wabersich & Zeilinger, [Automatica 2021](https://arxiv.org/abs/1812.05506)),
@@ -46,6 +60,143 @@ there is full braking with the steering pointed back at the centreline.
 Its virtue is what it does *not* do. No reward shaping, no restricted action
 space, no constrained policy class. The learner is untouched in the interior
 and constrained only at the boundary.
+
+### The certificate, in one picture
+
+```{image} _static/plots/safety_certificate.png
+:alt: nine candidate actions, each followed by its braking backup
+:width: 100%
+```
+
+Nine lines, one per action. Each is **not** a plan the car intends to follow —
+it is the emergency stop that would still be available *if that action were
+taken*. Green if that escape route stays on the track and ends stopped, red if
+it does not. The right panel is the same nine answers arranged as the action
+grid the agent actually chooses from, which is the form the verdict reaches the
+learner in.
+
+The state is not hand-placed: it was found by running a random policy *behind*
+the filter and stopping at the first step where the nine answers were not
+unanimous. A competent policy never goes near the boundary, and an unfiltered
+random one leaves the track before it gets interesting, so that regime — a
+policy pushing at the limit and being held off it — is the only place the
+picture has any content.
+
+Read off what the filter has decided at 2.3 m/s pointed at the inside of a
+corner: **steering into the wall is allowed only if you also brake.** Nobody
+wrote that rule. It falls out of asking whether a stop still exists.
+
+### Why the terminal set is not optional
+
+The single design decision that separates this from an N-step lookahead is the
+requirement that the backup **ends stopped**. It is worth spelling out what it
+buys, because "check N steps ahead" sounds like the same thing and is not.
+
+Let $\pi_b$ be the backup policy (full braking, steering to the centreline),
+$\mathcal{X}$ the constraint set (on track, clear of obstacles), and
+
+$$\mathcal{X}_\text{safe} \;=\; \{x \in \mathcal{X} : v \le v_\text{stop}\}$$
+
+Call a state **certified** if the $\pi_b$-trajectory from it stays in
+$\mathcal{X}$ for $N-1$ steps and lands in $\mathcal{X}_\text{safe}$.
+
+*Claim.* If $x_{t+1}$ is certified, then at the next step the filter always has
+at least one action it can admit — so it can never paint itself into a corner.
+
+*Proof.* Take the candidate $u = \pi_b(x_{t+1})$, the first move of the very
+backup that certified $x_{t+1}$. It leads to $x_{t+2}$, from which the same
+backup trajectory continues, stays in $\mathcal{X}$ for its remaining $N-2$
+steps, and reaches $\mathcal{X}_\text{safe}$. The certificate at $t+1$ asks for
+$N-1$ steps, which is one more than remains — and that is exactly what
+$\mathcal{X}_\text{safe}$ is for. A stopped car under full braking stays
+stopped and stays where it is, so $\mathcal{X}_\text{safe}$ is invariant under
+$\pi_b$ and the extra steps cost nothing. Therefore $u$ is certified, and the
+filter is never empty. $\square$
+
+That is **recursive feasibility**, and it is an induction, not a horizon. Drop
+the terminal condition and it collapses immediately: an $N$-step lookahead will
+happily approve full throttle at a wall $N+1$ steps away, then approve it again
+one step later, and again, until the wall is $N$ steps away and every action is
+already too late. The filter would have been feasible at every single step and
+crashed anyway.
+
+Two caveats, both real:
+
+**The induction is about the model.** Everything above is a statement about
+$f$, not about the car. If $f$ is optimistic the whole argument is sound and
+irrelevant — see [the grip sweep](#it-does-not-know-the-grip-either), where an
+optimistic filter is recursively feasible right up to the wall.
+
+**The action set is discrete.** $\pi_b(x)$ is a continuous steering value and
+the filter must round it onto the nine-action grid. Strictly, the claim holds
+for the rounded backup only if the rounded backup is itself certifiable, which
+is checked, not assumed — the fallback branch in `__call__` counts the states
+where nothing at all is certifiable (`n_no_safe_action`) rather than pretending
+they cannot occur.
+
+### The algorithm, in full
+
+```text
+filter(x, u_learner):
+    if certify(step(x, u_learner)):        # scalar fast path, ~0.3 ms
+        return u_learner, not_intervened
+
+    S = step(x, u)  for all nine u         # one vectorised control-rate step
+    ok = certify(S)                        # nine backups at once
+    if none(ok):
+        n_no_safe_action += 1
+        return brake_toward_centreline(x), intervened
+    return nearest u with ok[u], intervened   # nearest in (steer, throttle)
+
+certify(s):                                # s has already had the candidate applied
+    alive = s in X
+    repeat N-1 times:
+        s = f(s, pi_b(s))                  # full braking, steer to centreline
+        alive &= s in X
+    return alive and v(s) <= v_stop        # <- the terminal set
+```
+
+Two details in there are load-bearing. The candidate's own step is taken at the
+**control** rate even when the backup is predicted on a coarser grid, because
+that step is really going to happen. And the search order is by distance in
+`(steer, throttle)` from what the learner asked for, so an override is the
+*smallest* change that restores a backup rather than an arbitrary safe action —
+which is what makes the filter's effect on the policy as small as it can be.
+
+### Every knob, and what it costs
+
+| parameter | default | what it does | failure mode when wrong |
+|---|---|---|---|
+| `horizon` | 25 | steps the backup must survive | too short: the terminal set is unreachable at speed, so almost everything is refused (see below). Too long: cost, and pessimism accumulates |
+| `assumed_grip` | 1.0 | the filter's belief about the tyres | **the one that matters.** Optimistic → the guarantee is void. See the sweep below |
+| `assumed_vehicle` | env's own | mass, wheelbase, servo lag, drag | same shape of failure as grip, spread over more parameters |
+| `margin` | 0.05 m | shrinks the legal corridor | absorbs model error and state-estimate error; the cheapest robustness there is |
+| `stop_speed` | 0.25 m/s | what counts as "stopped" | too large and the terminal set is not really invariant; too small and it is unreachable |
+| `predict_dt_scale` | 1.0 | coarsens the backup's prediction grid | 2× is twice as fast and **three times** as interventionist (37% vs 13%): a braking curve predicted in 0.1 s jumps is pessimistic about where the car stops |
+| `credit` | `executed` | what the agent is told it did | changes what is learned, not what is safe. Measured below |
+| `obstacle_radius` | 0.44 m | clearance kept from other cars | on `overtake`; too small and the filter certifies a pass that clips |
+
+### The horizon, swept
+
+```{image} _static/plots/safety_knobs.png
+:alt: intervention rate and crash rate against horizon and against alpha
+:width: 100%
+```
+
+Left panel, under full throttle and random steering — a policy deliberately
+trying to crash. The reading is not the obvious one.
+
+A **short horizon looks safest**, and is not. At $N=3$ the filter overrides 98%
+of actions and the car never leaves the track, because at that horizon nothing
+that carries speed can reach a stop, so almost nothing is certifiable and the
+car is forced to crawl. It is not safe because it sees further; it is safe
+because it has taken the car away from the learner entirely. An intervention
+rate near 100% means the filter *is* the controller and the agent is no longer
+learning the task.
+
+The residual 7% of episodes off-track at $N=25$ and $N=35$ is not a horizon
+problem at all — it is `assumed_grip=1.0` against a car whose grip is drawn from
+$U(0.6, 1.4)$, which is the next section.
 
 ### Measured
 
@@ -115,20 +266,68 @@ learns more from what happened than from what it wanted.
 
 ### Three limitations, not caveats
 
-**It is privileged.** The filter runs on the vehicle state, not on the agent's
+#### It is privileged
+
+The filter runs on the vehicle state, not on the agent's
 nine beams. That is not cheating — on a real car it sits on the state
 estimator, which is where it belongs — but the guarantee is only ever as good
 as that estimate, and a filter tested against ground truth in simulation has
 not been tested in the part that usually fails.
 
-**It does not know the grip either.** `LaneKeep` redraws tyre grip every
-episode and never observes it; the filter predicts with `assumed_grip`. Set it
-above the truth and it certifies corners the car cannot take — crashes happen
-*through* the filter. `tests/test_safety.py` asserts this rather than leaving
-it as prose. Set it to the worst case and you buy safety with timidity. There
-is no setting that is both fast and guaranteed.
+#### It does not know the grip either
 
-**It makes the update off-policy.** The action reaching the environment is not
+`LaneKeep` redraws tyre grip every episode from $U(0.6, 1.4)$ and never
+observes it; the filter predicts with a fixed `assumed_grip`. This is the
+limitation that decides whether any of the rest is worth anything, so it is
+swept rather than asserted.
+
+```{image} _static/plots/safety_grip.png
+:alt: crash rate and intervention rate against the filter's assumed grip
+:width: 90%
+```
+
+| `assumed_grip` | episodes off-track | steps overridden |
+|---|---|---|
+| **0.6** — the worst case | **0%** | 40.3% |
+| 0.8 | 0% | 37.6% |
+| 1.0 — the *mean* | 7% | 36.5% |
+| 1.2 | 71% | 33.1% |
+| 1.4 — the best case | 79% | 38.7% |
+| 2.4 — badly wrong | **100%** | 17.4% |
+
+Full throttle with random steering, 14 episodes each. That policy is used
+deliberately: a uniformly random policy averages 0.9 m/s on this track, and at
+that speed the grip limit binds on **0.1%** of steps — the car is never going
+fast enough for grip to be what stops it, so the identical sweep run under a
+random policy returns a flat line at zero and measures nothing. Under full
+throttle the limit binds on 81% of steps.
+
+Three things fall out of that table.
+
+**Assuming the mean is not good enough.** At `assumed_grip=1.0` — the expected
+value of the true parameter, and the obvious choice — 7% of episodes end in a
+wall. The filter is optimistic on every episode where the draw came in below
+1.0, which is half of them. A guarantee that holds in expectation is not a
+guarantee; you have to assume the worst case, and at 0.6 the crash rate is
+exactly zero.
+
+**The failure is a cliff, not a slope.** Between 1.0 and 1.2 the crash rate goes
+from 7% to 71%. There is no gentle degradation to notice in testing and no
+margin to discover by being slightly careful.
+
+**Wrong filters intervene *less*.** The override rate *falls* from 40% to 17% as
+the filter becomes more optimistic. This is the property that makes an
+optimistic filter genuinely dangerous rather than merely useless: it does not
+announce itself by becoming annoying. It gets quieter, feels better tuned, and
+is certifying corners the car cannot take. **Intervention rate is not a safety
+metric** — it is a cost metric, and reading it as the former inverts the sign.
+
+There is no setting that is both fast and guaranteed. `tests/test_safety.py`
+asserts the optimistic failure rather than leaving it as prose.
+
+#### It makes the update off-policy
+
+The action reaching the environment is not
 always the one the policy chose, and TD(λ) has no term for "the action was
 replaced". `credit="executed"` tells the agent about what happened (the filter
 becomes part of the environment); `credit="proposed"` tells it about what it
@@ -177,6 +376,36 @@ Satisfy that every step and $h$ can never cross zero, so the safe set is
 forward invariant. **No horizon, no backup policy: one model step instead of
 twenty-five.**
 
+#### Where that inequality comes from
+
+In continuous time a control barrier function asks the safe set's boundary to
+be repelling: for an extended class-$\mathcal{K}$ function $\gamma$,
+
+$$\sup_{u \in \mathcal{U}} \dot h(x, u) \;\ge\; -\gamma\big(h(x)\big)$$
+
+Take the linear choice $\gamma(h) = \gamma h$. Then $\dot h \ge -\gamma h$, and
+by Grönwall $h(t) \ge h(0)e^{-\gamma t}$ — so if $h(0) > 0$, $h$ stays positive
+for all time. The constraint permits $h$ to shrink, but only geometrically, and
+geometric decay never reaches zero.
+
+The discrete-time version (Agrawal & Sreenath) replaces the derivative with a
+difference. Writing $\Delta h = h(x_{t+1}) - h(x_t)$ and asking
+$\Delta h \ge -\alpha\,h(x_t)$ rearranges to the condition above, and the same
+induction gives
+
+$$h(x_t) \;\ge\; (1-\alpha)^t\, h(x_0) \;>\; 0 \quad \text{whenever } h(x_0) > 0$$
+
+which is where $0 < \alpha \le 1$ comes from: at $\alpha = 1$ the condition is
+just $h(x_{t+1}) \ge 0$, the weakest thing that is still forward invariant, and
+as $\alpha \to 0$ it approaches "$h$ may never decrease at all".
+
+Two things about this are worth being clear-eyed about. The bound is
+$(1-\alpha)^t h(x_0)$, which **tends to zero** — the guarantee is that $h$ is
+never negative, not that it stays comfortably positive, so the car is permitted
+to converge on the boundary forever. And the induction, exactly like the
+predictive filter's, is a statement about the model $f$ used to evaluate
+$h(x_{t+1})$, so it inherits the grip problem unchanged.
+
 #### Why it is enumerate-and-check here too
 
 With a continuous input the constraint is linear in the control and the filter
@@ -198,6 +427,20 @@ line at $h=0$. On the left the safe set is the whole corridor -- a pure
 position constraint, blind to the fact that the car is *moving at a wall*. On
 the right it has collapsed to two islands on the straights, which is what a car
 in that state genuinely has.
+
+The same difference, as a function of the two variables that matter:
+
+```{image} _static/plots/safety_barrier_field.png
+:alt: h over lateral offset and heading error, for both barriers
+:width: 100%
+```
+
+$h_\text{lateral}$ has **flat contours**: it takes the same value whether the
+car is running parallel to the wall or driving straight into it, and it is
+identical at 1 m/s and at 2.5 m/s. That is the myopia, drawn. $h_\text{braking}$
+tilts with heading error and the tilt steepens with speed — the certified set
+narrows as the car commits to a direction, which is the behaviour a barrier for
+a *moving* vehicle has to have.
 
 
 The obvious barrier for staying on a track is $h = w - |d|$, with $d$ the
@@ -254,6 +497,22 @@ driver it is never needed — and it is **far less conservative**: it overrides
 nothing, while the CBF clips 8.7% of the actions of a driver that was never
 going to crash.
 
+### $\alpha$, swept
+
+The right-hand panel of [the conservatism figure](#the-horizon-swept) sweeps
+$\alpha$ under the same full-throttle stress test, and the result is a flat
+line: the override rate sits near 60% at every value from 1.0 to 0.1, while the
+crash rate wanders between 7% and 28% without an obvious trend.
+
+That is worth reporting precisely because it is a non-result. $\alpha$ is the
+CBF's only conservatism dial and on this task **it barely does anything**, for a
+structural reason: the binding constraint is almost always $h(x_{t+1}) \ge 0$
+rather than the decay rate, so tightening $(1-\alpha)h(x_t)$ changes which
+actions are admitted only in the narrow band of states where $h$ is small. The
+predictive filter's horizon, by contrast, moves the override rate from 36% to
+98%. If you need a dial you can actually turn, that asymmetry is the practical
+difference between the two methods on this problem.
+
 ### What the comparison actually says
 
 **Neither method is safer than the other. The barrier design is what carries
@@ -277,7 +536,71 @@ from being a filter and not from the criterion: both are privileged, both are
 only as good as their model of the car (including the grip neither knows), and
 both make the learner's update off-policy.
 
-### Not implemented
+## Choosing between them
+
+| if you… | use | because |
+|---|---|---|
+| have a credible backup controller (braking, a stop, a safe pose) | predictive | the terminal set is where the guarantee comes from, and you already have it |
+| cannot name a backup, but can write down what "safe" means as a function | CBF | it needs $h$, not $\pi_b$ |
+| run a policy that is usually right | predictive | it costs one scalar rollout when nothing is needed, and it overrode a competent policy **0%** of the time against the CBF's 8.7% |
+| are hard real-time with a tight worst case | CBF | one model step, bounded; the rollout's worst case is $N$ times its best |
+| have continuous inputs and a QP solver | CBF | the constraint is linear in $u$; the predictive form needs an NLP |
+| have a discrete action set | either | both degenerate to enumerate-and-check and the argmin is exact |
+| do not trust your vehicle model | **neither, yet** | both guarantees are statements about $f$. Fix the model first; see the grip sweep |
+
+The last row is not a rhetorical flourish. On this task the difference between
+the two methods is worth a few percent of intervention rate, and the difference
+between a correct and an optimistic grip estimate is worth **0% versus 71%** of
+episodes ending in a wall. Effort spent choosing between the criteria is effort
+not spent on the thing that actually decides the outcome.
+
+## Failure modes
+
+Collected in one place, because each of these was observed here rather than
+anticipated.
+
+**The model is optimistic.** Both filters certify and both are wrong. The
+symptom is counterintuitive: the intervention rate goes *down*. See the grip
+sweep.
+
+**The filter becomes the controller.** An override rate near 100% (the $N=3$
+column) is a filter that has taken the task away from the learner. The car does
+not crash and the agent does not learn either — check the intervention rate
+before believing a low crash rate.
+
+**The barrier is myopic.** A position-only $h$ permits full speed at a wall
+until the step before contact: 47% of episodes off-track for a filter that is
+functioning exactly as specified. This is a failure of the barrier, not of the
+method.
+
+**The terminal set is dropped.** An $N$-step lookahead with no terminal
+condition is feasible at every step and still crashes, because feasibility at
+$t$ says nothing about feasibility at $t+1$ without the induction.
+
+**The agent learns to lean on it.** Measured on `overtake`: an agent trained
+behind a filter scored 344 against 194 for one trained without, and then
+*under-performed* when the filter was removed. The filter is part of the
+environment the policy was fitted to. If it will not be there at deployment,
+it must not be there at training either — or the policy must be evaluated
+without it, which is what the `credit` ablation exists to expose.
+
+**The state estimate is wrong.** Not measured here, and the one most likely to
+bite on hardware. Both filters read the true state from the simulator. Every
+guarantee above is conditional on that, and a filter validated only against
+ground truth has not been tested in the component that usually fails.
+
+## Reproducing the figures
+
+```bash
+python scripts/make_safety_figures.py               # all four
+python scripts/make_safety_figures.py --only grip   # just the grip sweep
+```
+
+Everything is seeded. The certificate figure searches for its own state rather
+than being given one, so it will move if the filter's defaults change — which
+is the point.
+
+## Not implemented
 
 The **continuous-input QP** form. With nine discrete actions there is nothing
 for a QP solver to do, and adding one would mean adding a dependency to

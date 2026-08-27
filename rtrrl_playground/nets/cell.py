@@ -32,8 +32,12 @@ estimator  what it carries                                 memory           bias
 ``uoro``   a rank-1 random sketch ``J ~ s (x) theta~``      ``n + n p``      none*
 ``snap1``  ``J`` restricted to ``i == k``, true diagonal    ``n p``          yes
 ``rflo``   the same sparsity, decayed by ``leak`` only      ``n p``          yes
+``hybrid`` exact over a *known* block, ``rflo`` elsewhere   ``n_E^2 p + n p``  none on E
 ``none``   nothing; the recurrent weights never move        ``0``            n/a
 =========  ==============================================  ===============  ========
+
+``hybrid`` is this package's own, and it is the one that is *not* a bargain.
+See :meth:`OnlineCell.exact_rows`.
 
 \\* UORO is unbiased *in expectation* and noisy in any single realisation,
 which is the trade the other approximations refuse: they are wrong in a fixed
@@ -50,7 +54,7 @@ from __future__ import annotations
 
 import numpy as np
 
-ESTIMATORS = ("rtrl", "uoro", "snap1", "rflo", "none")
+ESTIMATORS = ("rtrl", "uoro", "snap1", "rflo", "hybrid", "none")
 
 
 class OnlineCell:
@@ -64,6 +68,38 @@ class OnlineCell:
     #: name -> (start, stop) columns of ``theta``. Filled in by each subclass.
     SLICES: dict[str, tuple[int, int]] = {}
     name = "cell"
+
+    @property
+    def exact_rows(self) -> int:
+        """How many leading units form a block whose influence is known exactly.
+
+        The premise of the ``hybrid`` estimator, and the reason it is not just
+        another approximation:
+
+        RFLO drops ``dh_i/dtheta_kj`` for ``i != k`` because carrying the whole
+        thing costs ``n^2 p``. But if the first ``n_E`` units are a *model you
+        already know* -- an integrator for speed, a servo lag, a solver iterate
+        -- then their parameters are few, and the exact gradient with respect to
+        *them* costs only ``n n_E p``: the slab ``J[i, k]`` over every unit
+        ``i`` and every known owner ``k < n_E``.
+
+        That slab is **closed under its own recursion** --
+        ``J[i,k] <- sum_l D[i,l] J[l,k] + delta_ik imm_i`` needs ``J[l,k]``,
+        which the slab holds -- so it is not an approximation. ``hybrid`` is
+        therefore *exact for the parameters you know* and RFLO for the rest, at
+        ``n / n_E`` of the cost of full RTRL.
+
+        **The direction matters, and getting it wrong is silent.** The first
+        version of this carried only ``n_E x n_E``, reasoning that the physics
+        block reads nothing outside itself. True, but irrelevant: the *learned*
+        units read the physics state, so they contribute to the physics
+        parameters' gradient, and dropping them left an error 4x smaller than
+        RFLO's rather than zero. The block has to be closed on the axis you are
+        summing over, not the one you are propagating along.
+
+        A cell returning 0 (the default) makes ``hybrid`` identical to RFLO.
+        """
+        return 0
 
     def __init__(self, n_in: int, n_hidden: int, estimator: str = "rflo",
                  rng: np.random.Generator | None = None, input_gain: float = 3.0,
@@ -147,7 +183,7 @@ class OnlineCell:
 
     @property
     def needs_D(self) -> bool:
-        return self.estimator in ("rtrl", "uoro", "snap1")
+        return self.estimator in ("rtrl", "uoro", "snap1", "hybrid")
 
     def reset_state(self, keep_influence: bool = False) -> np.ndarray:
         """Zero the state and (unless told otherwise) the carried influence.
@@ -160,7 +196,14 @@ class OnlineCell:
         if keep_influence:
             return self.h
         e = self.estimator
-        self.P = np.zeros((self.n, self.p)) if e in ("rflo", "snap1") else None
+        self.P = np.zeros((self.n, self.p)) if e in ("rflo", "snap1", "hybrid") else None
+        if e == "hybrid":
+            ne = self.exact_rows
+            self.n_exact = ne
+            # (n, n_E, p): the influence of *every* unit's state on the known
+            # block's parameters. Not (n_E, n_E, p) -- see the note in
+            # `exact_rows` about which direction the block has to be closed in.
+            self.Je = np.zeros((self.n, ne, self.p)) if ne else None
         if e == "rtrl":
             self.J = np.zeros((self.n, self.n * self.p))
         elif e == "uoro":
@@ -191,6 +234,18 @@ class OnlineCell:
             # exactly the term RFLO drops. One extra vector, no extra order.
             self.P *= np.clip(np.diag(D), -self.leak_max, self.leak_max)[:, None]
             self.P += imm
+        elif e == "hybrid":
+            # RFLO everywhere...
+            self.P *= leak[:, None]
+            self.P += imm
+            ne = self.n_exact
+            if ne:
+                # ...and the exact influence of the *known block's parameters*.
+                # J[i,k] for every unit i and every known parameter-owner
+                # k < ne. The recursion needs J[l,k] for all l, which is exactly
+                # what this slab holds, so it closes and is exact.
+                self.Je = np.einsum("il,lkj->ikj", D, self.Je)
+                self.Je[np.arange(ne), np.arange(ne)] += imm[:ne]
         elif e == "rtrl":
             self.J = D @ self.J
             self.J.reshape(self.n, self.n, self.p)[np.arange(self.n), np.arange(self.n)] += imm
@@ -226,6 +281,16 @@ class OnlineCell:
         e = self.estimator
         if e in ("rflo", "snap1"):
             return g[:, None] * self.P
+        if e == "hybrid":
+            dtheta = g[:, None] * self.P
+            ne = self.n_exact
+            if ne:
+                # Column k collects *every* unit that k influences -- including
+                # the learned ones, which read the known block's state. Summing
+                # only over the block itself was the first version of this and
+                # it was measurably wrong; see tests/test_gradients.py.
+                dtheta[:ne] = np.einsum("i,ikj->kj", g, self.Je)
+            return dtheta
         if e == "rtrl":
             return (g @ self.J).reshape(self.n, self.p)
         if e == "uoro":
@@ -245,6 +310,8 @@ class OnlineCell:
         e = self.estimator
         if e in ("rflo", "snap1"):
             return self.P.nbytes
+        if e == "hybrid":
+            return self.P.nbytes + (self.Je.nbytes if self.Je is not None else 0)
         if e == "rtrl":
             return self.J.nbytes
         if e == "uoro":

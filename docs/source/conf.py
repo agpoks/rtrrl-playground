@@ -18,6 +18,8 @@ extensions = [
 
 source_suffix = {".rst": "restructuredtext", ".md": "markdown"}
 myst_enable_extensions = ["colon_fence", "dollarmath", "amsmath"]
+# Level 4, because safety.md cross-references its own #### subsections.
+myst_heading_anchors = 4
 
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
