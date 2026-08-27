@@ -88,6 +88,39 @@ it is not needed; `mlp` is last on the memory task by exactly the margin theory
 predicts (it guesses) and third on the driving task. A cell that wins on one of
 these has not been shown to be a better cell.
 
+## Overtake -- where memory has to work
+
+| cell | return | sd | passes | crashes |
+|---|---|---|---|---|
+| `physics_ligru` | 425.7 | 296 | 2.07 | **14%** |
+| `ligru` | 397.9 | 164 | **2.55** | 21% |
+| `mlp` (no memory) | 374.2 | 137 | **3.07** | 35% |
+| `liquid_gru` | 344.9 | 195 | 2.24 | 31% |
+| `ctrnn` | 283.2 | 164 | 2.25 | 35% |
+| `ltc` | 267.5 | 192 | 1.29 | 17% |
+| `lrcu` | 186.6 | 211 | 1.40 | 28% |
+| *scripted `Overtaker`* | *~313* | | *1.6* | ***65%*** |
+
+*(400k steps, 6 seeds.)*
+
+Read that from the bottom row up.
+
+**Every learned cell roughly halves the scripted policy's crash rate** — 14–35%
+against 65% — and most of them pass more cars while doing it. That is the one
+clearly separated result on this task, and it is the one the environment was
+built to ask: the scripted overtaker commits to a side from a single frame and
+cannot tell how fast it is closing, and learning fixes exactly that.
+
+**Nothing else here is separated.** The standard deviations are 137–296 on means
+of 187–426; the top two differ by 28 with a standard error of 138, or 0.2 SE. Do
+not read the ranking.
+
+**The memoryless control makes the most passes and crashes the most** (3.07 and
+35%). It is not cautious, it is *reckless* — it dives for gaps it cannot judge
+the closing rate of, which is precisely the behaviour a policy without memory
+should exhibit here, and it is visible as the grey point at the top right of the
+figure above.
+
 ## LaneKeep -- can it drive at all
 
 300k steps, 4 seeds, library defaults. Reference points: a scripted

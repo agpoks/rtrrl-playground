@@ -38,9 +38,10 @@ def fig_cells():
     """The cell comparison, and the ordering inversion between the two tasks."""
     mc = {k: v for k, v in DATA["cells"]["memory_chain"].items() if not k.startswith("_")}
     lk = {k: v for k, v in DATA["cells"]["lanekeep"].items() if not k.startswith("_")}
+    ot = {k: v for k, v in DATA["cells"]["overtake"].items() if not k.startswith("_")}
     cells = list(mc)
     x = np.arange(len(cells))
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.5, 4.6))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(17, 4.6))
 
     ax1.bar(x, [mc[c][0] for c in cells], yerr=[mc[c][1] for c in cells],
             capsize=4, color=["tab:green" if c != "mlp" else "0.6" for c in cells])
@@ -62,8 +63,24 @@ def fig_cells():
     ax2.set_title("lanekeep — driving, which barely needs memory")
     ax2.legend(fontsize=8); ax2.grid(alpha=0.3, axis="y")
 
-    fig.suptitle("The ordering inverts: lrcu is first on memory and last on driving; "
-                 "the memoryless control (grey) is third on driving", y=1.02, fontsize=10)
+    # On overtake, return is the wrong headline -- progress alone pays -- so this
+    # panel plots the two numbers that say whether it learned to *overtake*.
+    sc = DATA["cells"]["overtake"]["_scripted"]
+    for c in ot:
+        ax3.scatter(ot[c]["crashes"], ot[c]["passes"], s=110,
+                    color="0.6" if c == "mlp" else "tab:purple", zorder=3)
+        ax3.annotate(c, (ot[c]["crashes"], ot[c]["passes"]), fontsize=8,
+                     textcoords="offset points", xytext=(7, 4))
+    ax3.scatter(sc["crashes"], sc["passes"], marker="*", s=320, color="tab:green", zorder=4)
+    ax3.annotate("scripted", (sc["crashes"], sc["passes"]), fontsize=8, color="tab:green",
+                 textcoords="offset points", xytext=(-20, -14))
+    ax3.set_xlabel("crash rate")
+    ax3.set_ylabel("passes per episode")
+    ax3.set_title("overtake — up and to the left is better\n(return is the wrong headline here)")
+    ax3.grid(alpha=0.3)
+
+    fig.suptitle("The ordering inverts across tasks — and on overtake every learned cell "
+                 "roughly halves the scripted policy's crash rate", y=1.02, fontsize=10)
     fig.tight_layout()
     _save(fig, "results_cells.png")
 
