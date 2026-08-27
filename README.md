@@ -64,6 +64,7 @@ python algos/rtrrl/example.py --env overtake --cell ltc --estimator rtrl --feedb
 | `lrcu` | the *capacitance* becomes one too -- the cell the RTRRL hardware paper recommends | [Farsang et al. 2024](https://arxiv.org/abs/2403.08791) |
 | `ligru` | gating without continuous time, as the control | [Ravanelli et al. 2018](https://arxiv.org/abs/1803.10225) |
 | `liquid_gru` | a GRU gate read as a *conductance* with a leak floor, so the influence series converges without a numerical cap ([derived from scratch in lesson 12](tutorial/12_cells_from_scratch.py)) | this repo's own |
+| `physics_ligru` | three units dead-reckon the agent's own command through the *known* vehicle response; the rest is LiGRU. Untrained they track the hidden steering angle at r=1.00 and the hidden speed at r=0.85 — and at 8 seeds it changes **nothing** measurable about the return, which is [written up as the null result it is](docs/source/cells.md) | this repo's own |
 | `mlp` | no recurrence at all, as the other control | -- |
 
 | `--estimator` | what it carries | memory | bias |

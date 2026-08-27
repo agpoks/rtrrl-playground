@@ -12,6 +12,7 @@ to know about how it got there.
 | `lrcu` | $h_{t+1} = (1 - \epsilon\sigma(f))h_t + \epsilon\tanh(u)\,e$ | the *capacitance* becomes one too | [Farsang et al. 2024](https://arxiv.org/abs/2403.08791) |
 | `ligru` | $h_{t+1} = z h_t + (1-z)\tanh(W_c\xi)$ | gating without continuous time, as the control | [Ravanelli et al. 2018](https://arxiv.org/abs/1803.10225) |
 | `liquid_gru` | $h_{t+1} = (h_t + \Delta t\, g\, c)/(1 + \Delta t\, g)$, $g = 1/\tau + z$ | the gate becomes a *conductance* with a floor | this repo |
+| `physics_ligru` | three units dead-reckon the command; the rest are LiGRU | a **physics prior** on the vehicle | this repo |
 | `mlp` | $h_{t+1} = \tanh(W x_t)$ | nothing; no recurrence at all | -- |
 
 **LRCU is here because of the hardware paper.** Lemmel, Resch, Farsang,
@@ -85,6 +86,94 @@ and points at initialisation rather than at the update equation.
 What it has that neither LiGRU nor LRCU has is an influence series that provably
 converges with no numerical cap, and a measured price for it. Worth a file, not
 worth a claim.
+
+## `physics_ligru`: give three units the vehicle for free
+
+The agent's hardest job on `lanekeep` is reconstructing the speed the beams
+leave out. But it is not short of information — **it knows what it commanded**.
+RTRRL's input is `[observation, previous action, previous reward]`, and for
+these tasks the previous action *is* a steering command and a throttle command.
+The vehicle's response to those is partly known in advance.
+
+So reserve three units and give them the known update law:
+
+$$\hat v' = (1-a_d)\hat v + a_a\,\text{throttle}, \qquad
+  \hat\delta' = (1-a_t)\hat\delta + a_t\,\text{steer}, \qquad
+  \hat p' = (1-a_p)\hat p + a_p\,(\hat v \hat\delta)$$
+
+The rest of the layer is an ordinary LiGRU learning the residual.
+
+The decode is free: the discrete action encodes $(\text{steer},
+\text{throttle}) = (a//3 - 1,\; a\%3 - 1)$, which against a one-hot is a
+*fixed linear map*, so these units need no learned input weights at all.
+
+**It is a prior, not a constraint.** The rate constants are learnable (through
+a sigmoid, so the units stay stable) and are *initialised from the nominal
+vehicle*: $a_a = a_{\max}\Delta t / v_{\max}$, $a_t = \Delta t/\tau_\delta$,
+$a_d = c_d \Delta t$. So it starts out knowing roughly how the car responds and
+RTRRL can retune it when the car turns out to be a different car — which is the
+sim-to-real setting of `tutorial/11`.
+
+**Untrained, it already works.** Correlation of the reserved units with the
+quantities the observation hides, before a single weight update:
+
+| | nominal vehicle | the *other* vehicle |
+|---|---|---|
+| unit 0 vs true speed | 0.85 | 0.92 |
+| unit 1 vs true steering angle | **1.00** | 0.97 |
+
+Unit 1 is exact on the nominal vehicle because the servo lag *is* a
+first-order filter and the unit is initialised to the right one.
+
+**Three properties it shares with the rest of the package.** It stays local
+(the yaw-rate proxy *reads* the other two units, but that is state coupling and
+belongs in $D$, not in `imm`); its leak is bounded below 1 by construction, so
+it needs no `leak_max`; and it **refuses to activate** unless the input carries
+the 3×3 driving action space — on `memory-chain` and `cartpole-vel` it is
+exactly LiGRU. An earlier version checked only that an action block fitted in
+the input and switched itself on for MemoryChain, decoding a two-action space
+into a steering command that does not exist. There is a test for that now.
+
+
+### Does it help? Measured, and no.
+
+| task | `ligru` | `physics_ligru` | difference |
+|---|---|---|---|
+| lanekeep, in sim | 504 ± ? | 484 | −20, 0.4 SE |
+| lanekeep, zero-shot to the other vehicle | 407 | 392 | −14, 0.2 SE |
+| lanekeep, after adapting on it | 383 | 397 | +14, 0.2 SE |
+| overtake (return) | 314 ± 206 | 366 ± 292 | +52, 0.4 SE |
+| overtake (passes) | 2.00 | 1.91 | −0.09, 0.1 SE |
+
+*(8 seeds each. None separated — every comparison is under half a standard
+error.)*
+
+**The prior works and the policy does not care.** The reserved units
+demonstrably reconstruct what the observation hides, before any training, and
+keep doing so on a vehicle they were not initialised for. Handing that to the
+policy for free changes nothing measurable about what the policy achieves.
+
+I predicted it would pay on `overtake` specifically — that is the task where
+committing to a pass needs a closing rate, which no single frame contains — and
+ran it to find out. It did not. The difference is in the predicted direction
+(+52 return, 12% crashes against 17%) and is 0.4 SE, which is not a result.
+
+The reading that fits: **state estimation is not the bottleneck on these
+tasks.** `lanekeep` is largely reactive (the memoryless control is competitive
+on it, which is already in the benchmark table), and on `overtake` what the
+physics units estimate is the *ego's* motion — while the quantity that actually
+decides a pass is the *opponent's* speed, which no amount of dead reckoning of
+your own commands will give you. Encoding the right physics into the wrong
+half of the problem is a fair description of what this cell does.
+
+An obvious next thing to try, untested: give the reserved units the *relative*
+dynamics — integrate the flagged obstacle beams to estimate a closing rate —
+rather than the ego's own.
+
+**What it is not:** a full observer. No correction step, nothing compares the
+prediction against the beams, no Kalman filter. It is open-loop dead reckoning
+of the commanded input, offered to the learned units as three features they
+would otherwise have to construct.
 
 ## Two things worth knowing before you write your own cell
 

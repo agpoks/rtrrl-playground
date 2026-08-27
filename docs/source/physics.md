@@ -118,6 +118,21 @@ angle in $[-0.21, 0.21]$, so a network with one input scale sees the variable
 that decides the episode at a tenth the amplitude of the one that barely
 matters.
 
+## The model the *network* is given
+
+`--cell physics_ligru` puts a piece of the model above **inside the recurrent
+cell**. Three units integrate the agent's own command through the known
+first-order response — motor gain and drag for speed, servo lag for steering,
+and $v\delta$ as a yaw-rate proxy — with the rate constants initialised from
+`VehicleParams` and then learnable. The rest of the layer is an ordinary LiGRU
+learning what the prior gets wrong.
+
+The point is that the input already contains what such a unit needs: RTRRL is
+fed the previous action, and for these tasks the previous action is a steering
+and throttle command. Untrained, the steering unit tracks the true (hidden)
+steering angle at correlation 1.00 and the speed unit tracks the true speed at
+0.85. See {doc}`cells`.
+
 ## The models the *controllers* believe
 
 Two places in this repo hold a model that is deliberately allowed to be wrong

@@ -189,3 +189,72 @@ def test_liquid_gru_leak_is_bounded_below_one_by_construction():
     bound = 1.0 / (1.0 + 1.0 / tau_max)
     assert lgru_leak <= bound + 1e-9, f"leak {lgru_leak} exceeded the bound {bound}"
     assert np.isfinite(lgru_p), "the influence array went non-finite despite the bound"
+
+
+def test_physics_ligru_only_activates_where_the_action_means_steer_and_throttle():
+    """It is a specialisation for the driving tasks and must refuse elsewhere.
+
+    An earlier version checked only that an action block fitted inside the
+    input and switched itself on for MemoryChain, decoding a two-action space
+    into a steering command that does not exist.
+    """
+    from rtrrl_playground import make_env
+    from rtrrl_playground.utils.load import load_algo
+
+    RTRRL = load_algo("rtrrl")
+    expected = {"lanekeep": 3, "overtake": 3, "memory-chain": 0, "cartpole-vel": 0}
+    for env_id, want in expected.items():
+        env = make_env(env_id)
+        agent = RTRRL(env.obs_dim, env.action_space, cell="physics_ligru", seed=0)
+        assert agent.cell.n_phys == want, f"{env_id}: n_phys {agent.cell.n_phys}, wanted {want}"
+
+
+def test_physics_units_dead_reckon_the_hidden_state():
+    """Untrained, the reserved units should already track what the beams hide.
+
+    That is the entire claim of the cell: the agent knows what it commanded, and
+    the response to a command is partly known in advance, so the hidden speed
+    and steering angle do not have to be learned from lidar.
+    """
+    from rtrrl_playground import make_env
+    from rtrrl_playground.utils.load import load_algo
+
+    env = make_env("lanekeep", grip_range=(1.0, 1.0))
+    agent = load_algo("rtrrl")(env.obs_dim, env.action_space, cell="physics_ligru", seed=0)
+    assert agent.cell.n_phys == 3
+
+    obs = env.reset(seed=0)
+    a = agent.start(obs)
+    v_true, v_hat, d_true, d_hat = [], [], [], []
+    for _ in range(400):
+        obs, r, te, tr, _i = env.step(a)
+        a = agent.step(obs, r, te, tr)
+        v_true.append(env.v)
+        d_true.append(env.delta)
+        v_hat.append(agent.cell.h[0])
+        d_hat.append(agent.cell.h[1])
+        if a is None:
+            a = agent.start(env.reset())
+
+    r_v = float(np.corrcoef(v_true, v_hat)[0, 1])
+    r_d = float(np.corrcoef(d_true, d_hat)[0, 1])
+    assert r_v > 0.6, f"speed unit tracked the hidden speed at only r={r_v:.2f}"
+    assert r_d > 0.9, f"steering unit tracked the true steering angle at only r={r_d:.2f}"
+
+
+def test_physics_leak_is_bounded_below_one():
+    """Same structural property as liquid_gru: leak = 1 - sigmoid(raw) < 1."""
+    cell = make_cell("physics_ligru", 19, 8, estimator="rflo", n_obs=9, n_act=9,
+                     leak_max=1.0, rng=np.random.default_rng(0))
+    cell.theta[:cell.n_phys, :4] = -20.0  # drive the rate constants to zero
+    cell.reset_state()
+    rng = np.random.default_rng(0)
+    worst = 0.0
+    for _ in range(100):
+        x = np.zeros(19)
+        x[9 + rng.integers(9)] = 1.0
+        xi = np.concatenate([x, cell.h, [1.0]])
+        _h, _imm, leak, _D = cell._forward(xi, False)
+        worst = max(worst, float(leak[:cell.n_phys].max()))
+        cell.step(x)
+    assert worst < 1.0, f"physics leak reached {worst}"

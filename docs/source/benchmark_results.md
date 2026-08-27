@@ -205,6 +205,15 @@ dependency it acquired.
 48% to 5%. If the vehicle is real, that trade — 400 → 344 in return, 48% → 5%
 in crashes — is not obviously the wrong one. If it is simulated, it clearly is.
 
+## A physics prior in the cell
+
+`--cell physics_ligru` reserves three units that dead-reckon the agent's own
+command through the known vehicle response. Untrained they track the hidden
+steering angle at r = 1.00 and the hidden speed at r = 0.85. At 8 seeds it
+changes nothing measurable: every comparison against plain `ligru`, on both
+driving tasks and on transfer to a different vehicle, is under half a standard
+error. See {doc}`cells` for the table and for what that probably means.
+
 ## Reproducing
 
 ```bash

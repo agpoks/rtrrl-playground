@@ -103,6 +103,14 @@ class RTRRL:
         self.obs_dim = int(obs_dim)
         n_in = obs_dim + (action_space.flat_dim + 1 if meta_inputs else 0)
 
+        if cell == "physics_ligru":
+            # This cell reads the command out of the meta-RL input block, so it
+            # has to be told where that block is. The agent already knows, and
+            # making the caller repeat it is a good way to get a silent
+            # fallback to plain LiGRU.
+            cell_kwargs.setdefault("n_obs", obs_dim)
+            cell_kwargs.setdefault("n_act", getattr(action_space, "n", None)
+                                   if meta_inputs else None)
         self.cell = make_cell(cell, n_in, n_hidden, estimator=estimator,
                               rng=self.rng, **cell_kwargs)
         head_kw = dict(feedback=feedback, entropy_coef=entropy_coef, rng=self.rng)
