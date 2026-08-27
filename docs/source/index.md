@@ -23,6 +23,7 @@ physics
 environments
 overtake_method
 safety
+animations
 real_data
 tutorial
 benchmarks

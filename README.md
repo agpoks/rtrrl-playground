@@ -126,6 +126,23 @@ rtrrl-playground/
 
 ## What it looks like when it works
 
+![a policy at full throttle held on the track by a predictive safety filter](docs/source/_static/anim/safety_filter.gif)
+
+Full throttle, random steering, behind a predictive safety filter. Right-hand
+panel is the filter's verdict on all nine actions — green where a safe backup
+exists — with a blue box on what the agent asked for and a dotted box on what
+actually ran. Where they separate, the filter intervened. It never leaves the
+track.
+
+More in [`docs/source/animations.md`](docs/source/animations.md), including
+learning as it happens and the same policy behind a control barrier function.
+They come from `rtrrl_playground.viz`, so you can point them at your own agent:
+
+```python
+from rtrrl_playground.viz import animate_episode
+animate_episode("overtake", my_policy, "pass.gif", follow=True)
+```
+
 MemoryChain-8, the pure memory test: optimal is `+1.0`, guessing is `0.0`, and
 a memoryless policy provably cannot beat guessing.
 

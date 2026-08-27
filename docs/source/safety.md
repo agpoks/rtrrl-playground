@@ -351,6 +351,7 @@ competent policy, that is the cost of the filter in practice. The vectorised
 nine-candidate version is kept for the fallback, and a test asserts the two
 certificates agree exactly.
 
+(part-2-cbf)=
 ## Part 2 — Control barrier functions
 
 `rtrrl_playground/cbf.py` implements the **pointwise** alternative, so the two

@@ -162,6 +162,25 @@ class DiscreteCBFFilter:
         return np.where(bad, -1.0, h_track)
 
     # -- the filter --------------------------------------------------------
+    def _h_next(self, state, obstacles=None):
+        """``(h(x_{t+1}) for all nine actions, the target it must clear)``."""
+        state = np.asarray(state, dtype=np.float64)
+        target = (1.0 - self.alpha) * float(self.h(state, obstacles)[0])
+        s0 = np.repeat(state[None, :], self.n_actions, axis=0)
+        s1 = self.model.step(s0, self._grid[:, 0], self._grid[:, 1])
+        return self.h(s1, obstacles), target
+
+    def admissible(self, state, obstacles=None) -> np.ndarray:
+        """Which of the nine actions satisfy the barrier condition, as a mask.
+
+        The filter's verdict without the filter's side effects: no statistics
+        are updated and no action is chosen. Useful for plotting what the
+        criterion allows at a state, which is otherwise only observable one
+        action at a time through :meth:`__call__`.
+        """
+        h_next, target = self._h_next(state, obstacles)
+        return h_next >= target
+
     def __call__(self, state, proposed_action: int, obstacles=None):
         """Return ``(action_to_apply, intervened)``.
 
@@ -182,9 +201,7 @@ class DiscreteCBFFilter:
         if float(self.h(s_one, obstacles)[0]) >= target:
             return a, False
 
-        s0 = np.repeat(state[None, :], self.n_actions, axis=0)
-        s1 = self.model.step(s0, self._grid[:, 0], self._grid[:, 1])
-        h_next = self.h(s1, obstacles)
+        h_next, target = self._h_next(state, obstacles)
         ok = h_next >= target
         self.n_interventions += 1
         if not ok.any():

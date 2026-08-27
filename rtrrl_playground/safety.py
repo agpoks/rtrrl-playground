@@ -316,6 +316,21 @@ class PredictiveSafetyFilter:
             thr, h = -1.0, pdt
         return v <= self.stop_speed
 
+    def admissible(self, state, obstacles=None) -> np.ndarray:
+        """Which of the nine actions have a safe backup from ``state``, as a mask.
+
+        The filter's verdict without the filter's side effects: no statistics
+        are updated and no action is chosen. Note that :meth:`_certify` takes
+        states the candidate has *already* been applied to, so the candidate's
+        own control-rate step happens here first -- which is the same order
+        :meth:`__call__` uses, and getting it wrong silently returns the same
+        answer nine times.
+        """
+        s0 = np.repeat(np.asarray(state, dtype=np.float64)[None, :],
+                       self.n_actions, axis=0)
+        s1 = self._first.step(s0, self._grid[:, 0], self._grid[:, 1])
+        return self._certify(s1, obstacles)
+
     # -- the filter --------------------------------------------------------
     def __call__(self, state, proposed_action: int, obstacles=None):
         """Return ``(action_to_apply, intervened)``.
@@ -334,12 +349,10 @@ class PredictiveSafetyFilter:
         if self._certify_scalar(state, a, obstacles):
             return a, False
 
-        s0 = np.repeat(state[None, :], self.n_actions, axis=0)
         # The candidate's own step is taken at the *control* rate -- that one is
         # really applied, so predicting it on a coarser grid would certify an
         # action the car does not actually take.
-        s1 = self._first.step(s0, self._grid[:, 0], self._grid[:, 1])
-        ok = self._certify(s1, obstacles)
+        ok = self.admissible(state, obstacles)
         if not ok.any():
             # Nothing is certifiable. This is not a filter failure so much as a
             # report that the state should never have been reached -- with a

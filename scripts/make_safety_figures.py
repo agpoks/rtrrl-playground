@@ -51,19 +51,6 @@ def _bg(ax, track, zoom=None):
         ax.set_xlim(zoom[0], zoom[1]); ax.set_ylim(zoom[2], zoom[3])
 
 
-def _admits(filt, state, obstacles=None):
-    """Which of the nine actions the filter would allow from ``state``.
-
-    ``_certify`` takes states that have *already* had the candidate applied --
-    it certifies the backup from there -- so the candidate step at the control
-    rate has to happen first, exactly as ``PredictiveSafetyFilter.__call__``
-    does it.
-    """
-    s0 = np.repeat(np.asarray(state, float)[None, :], filt.n_actions, axis=0)
-    s1 = filt._first.step(s0, filt._grid[:, 0], filt._grid[:, 1])
-    return filt._certify(s1, obstacles)
-
-
 def _marginal_state(filt, env, want=(3, 7), seeds=range(60)):
     """Find a state where the filter genuinely disagrees with some actions.
 
@@ -84,7 +71,7 @@ def _marginal_state(filt, env, want=(3, 7), seeds=range(60)):
         obs = env.reset(seed=int(seed))
         for _ in range(env.max_steps):
             s = np.array([env.x, env.y, env.psi, env.v, env.delta])
-            n = int(_admits(filt, s).sum())
+            n = int(filt.admissible(s).sum())
             if want[0] <= n <= want[1] and env.v > 2.2:
                 return s, seed
             a, _ = filt(s, int(rng.integers(9)))
@@ -110,7 +97,7 @@ def fig_certificate():
     filt = PredictiveSafetyFilter(env.track, dt=env.dt, horizon=25,
                                   assumed_vehicle=getattr(env, "vehicle", None))
     s0, seed = _marginal_state(filt, env)
-    ok = _admits(filt, s0)
+    ok = filt.admissible(s0)
 
     fig = plt.figure(figsize=(11.0, 4.4))
     gs = fig.add_gridspec(1, 2, width_ratios=[2.05, 1.0], wspace=0.18)
