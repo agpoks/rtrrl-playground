@@ -39,10 +39,10 @@ papers/pdfs/
 !transformer_playground/**/*.npy
 
 # --- Benchmark outputs ---
-benchmarks/results/*.csv
-benchmarks/results/*.json
-benchmarks/results/*.png
-!benchmarks/results/.gitkeep
+# Measured results ARE the repo: every table and figure in the docs is
+# generated from them, so a checkout without them cannot reproduce the pages.
+# Only the bulky raw sweep dumps stay out.
+benchmarks/results/raw/
 
 # --- Docs build ---
 docs/build/
@@ -61,6 +61,7 @@ docs/_build_test/
 *.token
 
 # --- rtrrl-playground run artifacts ---
+# Per-experiment scratch only. Figures are NOT excluded anywhere: plots are
+# the point of a playground repo, and a global *.png rule silently drops new
+# ones without anybody noticing.
 runs/
-*.png
-!docs/source/_static/**/*.png

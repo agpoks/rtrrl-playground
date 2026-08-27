@@ -1,0 +1,150 @@
+{
+ "config": {
+  "env": "memory-chain",
+  "steps": 150000,
+  "seeds": 3,
+  "env_kwargs": {
+   "length": 8
+  },
+  "agents": [
+   {
+    "name": "rtrrl/ctrnn",
+    "algo": "rtrrl",
+    "cell": "ctrnn"
+   },
+   {
+    "name": "rtrrl/ltc",
+    "algo": "rtrrl",
+    "cell": "ltc"
+   },
+   {
+    "name": "rtrrl/lrcu",
+    "algo": "rtrrl",
+    "cell": "lrcu"
+   },
+   {
+    "name": "ac_lambda (memoryless)",
+    "algo": "ac_lambda"
+   },
+   {
+    "name": "a2c_bptt (T=32)",
+    "algo": "a2c_bptt",
+    "truncation": 32
+   }
+  ]
+ },
+ "steps": 15000,
+ "seeds": 2,
+ "results": [
+  {
+   "name": "rtrrl/ctrnn",
+   "seed": 0,
+   "status": "ok",
+   "params": 1379,
+   "time_s": 5.777783862955403,
+   "final": 0.0,
+   "influence": 10240,
+   "passes": 0.0,
+   "crashes": 0.0
+  },
+  {
+   "name": "rtrrl/ctrnn",
+   "seed": 1,
+   "status": "ok",
+   "params": 1379,
+   "time_s": 5.809474833949935,
+   "final": 0.0,
+   "influence": 10240,
+   "passes": 0.0,
+   "crashes": 0.0
+  },
+  {
+   "name": "rtrrl/ltc",
+   "seed": 0,
+   "status": "ok",
+   "params": 1411,
+   "time_s": 6.242977949033957,
+   "final": 0.0,
+   "influence": 10496,
+   "passes": 0.0,
+   "crashes": 0.0
+  },
+  {
+   "name": "rtrrl/ltc",
+   "seed": 1,
+   "status": "ok",
+   "params": 1411,
+   "time_s": 6.24663467600476,
+   "final": 0.0,
+   "influence": 10496,
+   "passes": 0.0,
+   "crashes": 0.0
+  },
+  {
+   "name": "rtrrl/lrcu",
+   "seed": 0,
+   "status": "ok",
+   "params": 3875,
+   "time_s": 7.263938846997917,
+   "final": 1.0,
+   "influence": 30208,
+   "passes": 0.0,
+   "crashes": 0.0
+  },
+  {
+   "name": "rtrrl/lrcu",
+   "seed": 1,
+   "status": "ok",
+   "params": 3875,
+   "time_s": 7.224785589030944,
+   "final": 0.0,
+   "influence": 30208,
+   "passes": 0.0,
+   "crashes": 0.0
+  },
+  {
+   "name": "ac_lambda (memoryless)",
+   "seed": 0,
+   "status": "ok",
+   "params": 1251,
+   "time_s": 5.066026392974891,
+   "final": 0.0,
+   "influence": 9216,
+   "passes": 0.0,
+   "crashes": 0.0
+  },
+  {
+   "name": "ac_lambda (memoryless)",
+   "seed": 1,
+   "status": "ok",
+   "params": 1251,
+   "time_s": 5.146125926054083,
+   "final": 0.0,
+   "influence": 9216,
+   "passes": 0.0,
+   "crashes": 0.0
+  },
+  {
+   "name": "a2c_bptt (T=32)",
+   "seed": 0,
+   "status": "ok",
+   "params": 1379,
+   "time_s": 25.785553663037717,
+   "final": 1.0,
+   "influence": 0,
+   "passes": 0.0,
+   "crashes": 0.0
+  },
+  {
+   "name": "a2c_bptt (T=32)",
+   "seed": 1,
+   "status": "ok",
+   "params": 1379,
+   "time_s": 25.621733083040453,
+   "final": 1.0,
+   "influence": 0,
+   "passes": 0.0,
+   "crashes": 0.0
+  }
+ ]
+}

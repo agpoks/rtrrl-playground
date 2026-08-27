@@ -1,0 +1,419 @@
+{
+  "_note": "Every number in the docs' results tables and figures, in one place, so the two cannot disagree. Each block records how it was produced; the commands are in docs/source/benchmark_results.md under 'Reproducing'.",
+  "cells": {
+    "_provenance": {
+      "steps_memory_chain": 200000,
+      "steps_lanekeep": 300000,
+      "seeds": 3,
+      "command": "python benchmarks/sweep.py --env <env> --grid cells --seeds 3",
+      "steps_overtake": 400000,
+      "seeds_overtake": 6
+    },
+    "memory_chain": {
+      "_optimum": 1.0,
+      "_guessing": 0.0,
+      "lrcu": [
+        0.889,
+        0.04
+      ],
+      "ligru": [
+        0.883,
+        0.037
+      ],
+      "liquid_gru": [
+        0.775,
+        0.09
+      ],
+      "ctrnn": [
+        0.263,
+        0.399
+      ],
+      "ltc": [
+        0.011,
+        0.019
+      ],
+      "mlp": [
+        -0.005,
+        0.018
+      ]
+    },
+    "lanekeep": {
+      "_scripted": 575,
+      "_random": 23,
+      "ligru": [
+        468.4,
+        70.5
+      ],
+      "mlp": [
+        444.8,
+        74.7
+      ],
+      "ctrnn": [
+        405.4,
+        117.1
+      ],
+      "liquid_gru": [
+        350.6,
+        63.6
+      ],
+      "ltc": [
+        301.2,
+        216.1
+      ],
+      "lrcu": [
+        256.3,
+        180.9
+      ]
+    },
+    "overtake": {
+      "_scripted": {
+        "return": 313,
+        "passes": 1.6,
+        "crashes": 0.65
+      },
+      "_note": "return is the wrong headline here: progress alone pays, so an agent that never passes anybody and never crashes scores respectably. passes and crashes are the numbers that say whether it learned to overtake.",
+      "physics_ligru": {
+        "return": [
+          425.7,
+          295.9
+        ],
+        "passes": 2.07,
+        "crashes": 0.14
+      },
+      "ligru": {
+        "return": [
+          397.9,
+          163.9
+        ],
+        "passes": 2.55,
+        "crashes": 0.21
+      },
+      "mlp": {
+        "return": [
+          374.2,
+          136.9
+        ],
+        "passes": 3.07,
+        "crashes": 0.35
+      },
+      "liquid_gru": {
+        "return": [
+          344.9,
+          194.7
+        ],
+        "passes": 2.24,
+        "crashes": 0.31
+      },
+      "ctrnn": {
+        "return": [
+          283.2,
+          164.0
+        ],
+        "passes": 2.25,
+        "crashes": 0.35
+      },
+      "ltc": {
+        "return": [
+          267.5,
+          192.0
+        ],
+        "passes": 1.29,
+        "crashes": 0.17
+      },
+      "lrcu": {
+        "return": [
+          186.6,
+          211.1
+        ],
+        "passes": 1.4,
+        "crashes": 0.28
+      }
+    }
+  },
+  "ligru_vs_liquid_gru_8_seeds": {
+    "_provenance": {
+      "seeds": 8,
+      "note": "the closest pair, re-run at 8 seeds because 3 could not rank them"
+    },
+    "memory_chain": {
+      "ligru": [
+        0.835,
+        0.092
+      ],
+      "liquid_gru": [
+        0.565,
+        0.322
+      ],
+      "separation_SE": 2.1
+    },
+    "lanekeep": {
+      "ligru": [
+        436.3,
+        86.6
+      ],
+      "liquid_gru": [
+        337.2,
+        157.8
+      ],
+      "separation_SE": 1.5
+    }
+  },
+  "safety_filter": {
+    "_provenance": {
+      "env": "lanekeep",
+      "steps": 200000,
+      "seeds": 4,
+      "command": "python tutorial/10_safety_filter.py --steps 200000 --seeds 4"
+    },
+    "no filter": {
+      "return": [
+        428.3,
+        96.6
+      ],
+      "train_off": 0.613,
+      "eval_off": 0.3,
+      "filtered": 0.0
+    },
+    "grip 1.0, executed": {
+      "return": [
+        353.6,
+        135.8
+      ],
+      "train_off": 0.213,
+      "eval_off": 0.062,
+      "filtered": 0.158
+    },
+    "grip 1.0, proposed": {
+      "return": [
+        355.8,
+        216.2
+      ],
+      "train_off": 0.206,
+      "eval_off": 0.138,
+      "filtered": 0.307
+    },
+    "grip 0.6 (worst case)": {
+      "return": [
+        449.2,
+        154.8
+      ],
+      "train_off": 0.0,
+      "eval_off": 0.0,
+      "filtered": 0.175
+    },
+    "grip 1.4 (optimistic)": {
+      "return": [
+        329.2,
+        52.7
+      ],
+      "train_off": 0.608,
+      "eval_off": 0.512,
+      "filtered": 0.078
+    }
+  },
+  "sim_to_real": {
+    "_provenance": {
+      "env": "lanekeep",
+      "sim_steps": 300000,
+      "real_steps": 150000,
+      "seeds": 4,
+      "command": "python tutorial/11_sim_to_real.py --sim-steps 300000 --real-steps 150000"
+    },
+    "unfiltered": {
+      "1. sim -> sim (ceiling)": [
+        439.0,
+        83.0
+      ],
+      "2. sim -> real, frozen": [
+        367.9,
+        117.7
+      ],
+      "3. + RTRRL on the vehicle": [
+        399.9,
+        122.5
+      ],
+      "4. real from scratch": [
+        453.9,
+        88.4
+      ],
+      "crash_rate_while_adapting": 0.48
+    },
+    "filtered": {
+      "3. behind a filter, evaluated naked": [
+        194.1,
+        129.5
+      ],
+      "3b. ...evaluated with its filter": [
+        343.9,
+        203.4
+      ],
+      "crash_rate_while_adapting": 0.05
+    }
+  },
+  "estimators": {
+    "_provenance": {
+      "source": "tutorial/02_gradients_online.py",
+      "cell": "ctrnn",
+      "n": 16,
+      "note": "cosine similarity to the exact RTRL gradient"
+    },
+    "delays": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32
+    ],
+    "rflo": [
+      0.716,
+      0.713,
+      0.709,
+      0.701,
+      0.672,
+      0.674
+    ],
+    "snap1": [
+      0.717,
+      0.714,
+      0.71,
+      0.701,
+      0.673,
+      0.676
+    ],
+    "uoro": [
+      0.104,
+      0.106,
+      0.083,
+      0.1,
+      0.097,
+      0.118
+    ],
+    "bptt-4": [
+      0.912,
+      0.921,
+      0.92,
+      0.934,
+      0.905,
+      0.906
+    ],
+    "bptt-16": [
+      0.999,
+      0.999,
+      0.999,
+      0.999,
+      0.999,
+      0.999
+    ],
+    "cost": {
+      "_note": "influence KiB, microseconds per step, n=32 n_in=20",
+      "rtrl": [
+        432.0,
+        1000
+      ],
+      "uoro": [
+        13.8,
+        90
+      ],
+      "snap1": [
+        13.5,
+        55
+      ],
+      "rflo": [
+        13.5,
+        45
+      ]
+    }
+  },
+  "cbf_vs_predictive": {
+    "_provenance": {
+      "env": "lanekeep",
+      "episodes": 15,
+      "note": "filter us is the filter's own cost, with the environment's ~120 us subtracted. Both filters get the same proposed-action-first shortcut."
+    },
+    "random_policy": {
+      "none": {
+        "off_track": 1.0,
+        "filtered": null,
+        "filter_us": null
+      },
+      "CBF h=lateral (naive)": {
+        "off_track": 0.47,
+        "filtered": 0.145,
+        "filter_us": 264
+      },
+      "CBF h=braking": {
+        "off_track": 0.0,
+        "filtered": 0.137,
+        "filter_us": 280
+      },
+      "predictive (25-step)": {
+        "off_track": 0.0,
+        "filtered": 0.107,
+        "filter_us": 565
+      }
+    },
+    "competent_policy": {
+      "CBF h=braking": {
+        "off_track": 0.0,
+        "return": 569,
+        "filtered": 0.087,
+        "filter_us": 279
+      },
+      "predictive (25-step)": {
+        "off_track": 0.0,
+        "return": 570,
+        "filtered": 0.0,
+        "filter_us": 172
+      }
+    }
+  },
+  "hybrid_estimator": {
+    "_provenance": {
+      "source": "estimator='hybrid' on PhysicsLiGRU, 6 seeds",
+      "note": "Exactness of the gradient w.r.t. the known block's parameters is verified against exact RTRL in tests/test_gradients.py; these are the policy-level numbers, which are a different question."
+    },
+    "exactness": {
+      "_note": "max abs error in dtheta on the known block, vs exact RTRL",
+      "hybrid": 1.388e-17,
+      "rflo": 0.07515
+    },
+    "influence_bytes": {
+      "rtrl": 28672,
+      "hybrid": 14336,
+      "rflo": 3584
+    },
+    "lanekeep": {
+      "seeds": 6,
+      "rflo": [
+        461.2,
+        98.7
+      ],
+      "hybrid": [
+        454.4,
+        87.2
+      ],
+      "delta": -6.8,
+      "se": 0.1,
+      "separated": false
+    },
+    "overtake": {
+      "seeds": 6,
+      "rflo": [
+        425.7,
+        295.9
+      ],
+      "hybrid": [
+        377.7,
+        188.4
+      ],
+      "rflo_passes": 2.07,
+      "hybrid_passes": 1.69,
+      "rflo_crashes": 0.14,
+      "hybrid_crashes": 0.2,
+      "delta": -48.1,
+      "se": 0.3,
+      "separated": false
+    }
+  }
+}
