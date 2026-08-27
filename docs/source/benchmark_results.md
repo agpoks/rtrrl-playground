@@ -118,6 +118,54 @@ RTRRL on `lanekeep`, 200k steps, 4 seeds — see {doc}`safety`.
 The worst-case filter crashed zero times in 200k steps of learning and still
 finished with the highest return. The optimistic one is worse than no filter.
 
+## Sim-to-real
+
+A policy trained in simulation, deployed on a vehicle that differs in nine
+unobservable parameters (see {doc}`physics`), then allowed to keep learning.
+
+| condition | return | sd | off-track |
+|---|---|---|---|
+| 1. sim → sim (the ceiling) | 439.0 | 83 | 30% |
+| 2. sim → real, **frozen** (the gap) | 367.9 | 118 | 38% |
+| 3. + RTRRL adapting on the vehicle | **399.9** | 123 | 36% |
+| 4. real from scratch, same total budget | **453.9** | 88 | 27% |
+
+*(4 seeds, 300k steps in sim + 150k on the vehicle. Crashed in 48% of episodes
+while adapting; **45% of the transfer gap closed online**.)*
+
+With a predictive safety filter around the on-vehicle phase:
+
+| condition | return | sd | off-track |
+|---|---|---|---|
+| 3. + RTRRL behind a filter, evaluated **naked** | 194.1 | 130 | 73% |
+| 3b. ...the same agent evaluated **with its filter** | 343.9 | 203 | **11%** |
+
+*(Crashed in 5% of episodes while adapting, against 48% unfiltered.)*
+
+Four things, and three of them are uncomfortable:
+
+**Online adaptation works, and it is modest.** 45% of the transfer gap closes
+in 150k on-vehicle steps. Real, reproducible, and not the tenfold result a
+headline would want.
+
+**Learning from scratch on the vehicle beat fine-tuning** at the same total
+budget (454 vs 400). On this task the pretraining bought nothing — the
+simulator's policy is a *worse* starting point than random, because it encodes
+a vehicle that does not exist. That is exactly the row this experiment was
+designed to be able to embarrass itself with, and on a real car you could never
+run it: you cannot spend 450k steps crashing. It is free here, so it gets run.
+
+**An agent that learns behind a safety filter learns to lean on it.** Trained
+filtered and then evaluated naked it scores 194 — far worse than never
+adapting at all. Evaluated *with* its filter, as it would actually be deployed,
+it scores 344 at an 11% off-track rate. Both numbers are true and reporting
+only the second would be dishonest; the gap between them is the size of the
+dependency it acquired.
+
+**The safety filter still did its job.** Crashes during adaptation fell from
+48% to 5%. If the vehicle is real, that trade — 400 → 344 in return, 48% → 5%
+in crashes — is not obviously the wrong one. If it is simulated, it clearly is.
+
 ## Reproducing
 
 ```bash
@@ -126,6 +174,8 @@ python benchmarks/sweep.py --env lanekeep --grid cells --steps 300000 --seeds 4
 python benchmarks/sweep.py --env lanekeep --grid estimators --steps 300000 --seeds 4
 python benchmarks/run_suite.py --config benchmarks/configs/driving.yaml
 python tutorial/10_safety_filter.py --steps 200000 --seeds 4
+python tutorial/11_sim_to_real.py --sim-steps 300000 --real-steps 150000
+python tutorial/11_sim_to_real.py --safe
 ```
 
 Each of those is a few minutes on 15 cores.

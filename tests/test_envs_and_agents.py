@@ -114,3 +114,61 @@ def test_imitation_moves_the_policy_towards_the_expert():
         agreement(500)
     after = agreement(500)
     assert after > before, f"cloning did not improve agreement: {before:.2f} -> {after:.2f}"
+
+
+def test_vehicle_params_actually_change_the_dynamics():
+    """A second vehicle must be a different vehicle, not a different label."""
+    from rtrrl_playground import REAL_VEHICLE, VehicleParams
+
+    sim, real = VehicleParams(), REAL_VEHICLE
+    diff = sim.diff(real)
+    assert len(diff) >= 5, f"only {len(diff)} parameters differ -- too gentle to be a gap"
+
+    traj = {}
+    for name, veh in (("sim", sim), ("real", real)):
+        env = make_env("lanekeep", vehicle=veh, grip_range=(1.0, 1.0))
+        env.reset(seed=0)
+        for _ in range(40):
+            env.step(5)  # straight, full throttle
+        traj[name] = np.array([env.x, env.y, env.psi, env.v])
+    assert not np.allclose(traj["sim"], traj["real"], atol=1e-3), \
+        "the two vehicles produced the same trajectory from the same actions"
+
+
+def test_steering_bias_makes_straight_not_straight():
+    """The defect that a sim-trained policy has never had to handle."""
+    from rtrrl_playground import VehicleParams
+
+    out = {}
+    for bias in (0.0, 0.05):
+        env = make_env("lanekeep", vehicle=VehicleParams(steer_bias=bias),
+                       grip_range=(1.0, 1.0), start_jitter=0.0)
+        env.reset(seed=0)
+        for _ in range(30):
+            env.step(4)  # steer "straight", coast
+        out[bias] = env.psi
+    assert abs(out[0.05] - out[0.0]) > 0.05, \
+        "a steering trim did not bend the trajectory -- steer_bias is not wired in"
+
+
+def test_beam_noise_and_dropout_reach_the_observation():
+    """Same vehicle, same seed, same actions -- only the sensor differs."""
+    from rtrrl_playground import VehicleParams
+
+    def drive(vehicle, n=40):
+        env = make_env("lanekeep", vehicle=vehicle, grip_range=(1.0, 1.0))
+        obs = [env.reset(seed=3)]
+        for _ in range(n):
+            o, _r, te, tr, _i = env.step(4)
+            obs.append(o)
+            if te or tr:
+                break
+        return np.array(obs)
+
+    clean = drive(VehicleParams())
+    again = drive(VehicleParams())
+    noisy = drive(VehicleParams(beam_noise=0.1, beam_dropout=0.1))
+    assert np.allclose(clean, again), "the clean sensor is not reproducible from a seed"
+    n = min(len(clean), len(noisy))
+    assert not np.allclose(clean[:n], noisy[:n], atol=1e-6), \
+        "sensor defects never reached the observation"

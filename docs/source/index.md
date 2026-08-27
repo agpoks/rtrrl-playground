@@ -19,6 +19,7 @@ getting_started
 the_algorithm
 cells
 estimators
+physics
 environments
 safety
 real_data

@@ -26,6 +26,7 @@ from rtrrl_playground.envs.lanekeep import LaneKeep
 from rtrrl_playground.envs.memory_chain import MemoryChain
 from rtrrl_playground.envs.overtake import Overtake
 from rtrrl_playground.envs.track import Track, TRACKS
+from rtrrl_playground.envs.vehicle import REAL_VEHICLE, VehicleParams
 
 ENV_IDS = ["memory-chain", "cartpole-vel", "lanekeep", "overtake"]
 
@@ -45,4 +46,4 @@ def make_env(env_id: str, **kwargs):
 
 
 __all__ = ["make_env", "ENV_IDS", "MemoryChain", "CartPoleVel", "LaneKeep",
-           "Overtake", "Track", "TRACKS"]
+           "Overtake", "Track", "TRACKS", "VehicleParams", "REAL_VEHICLE"]

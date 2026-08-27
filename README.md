@@ -44,6 +44,7 @@ matching notebook:
 | 8 | [Onto `scuderia_gym_jax`](tutorial/08_to_scuderia_gym_jax.py) | Swap the toy bicycle for real ST/STD vehicle models, and what changes when you do. |
 | 9 | [Clone from a real bag](tutorial/09_clone_from_a_real_bag.py) | Clone a real driver from a ROS 2 recording, and rebuild the circuit it was recorded on. |
 | 10 | [Safety filter](tutorial/10_safety_filter.py) | A predictive safety filter from scratch: never leave the track *while learning*, and what that costs. |
+| 11 | [Sim-to-real](tutorial/11_sim_to_real.py) | Train in simulation, deploy on a vehicle the simulator was wrong about, and close the gap online. |
 
 ## What is in the box
 
@@ -77,6 +78,15 @@ same agent with the recurrence deleted -- it says what the memory was worth.
 [`a2c_bptt`](algos/a2c_bptt) is the same recurrent cell trained the standard
 way, with truncated BPTT and PyTorch autograd -- it says what the online
 gradient cost. See [`algos/README.md`](algos/README.md).
+
+**The physics is documented**, not buried: a kinematic bicycle with a yaw-rate
+cap standing in for understeer, a first-order steering servo, drag, and a
+per-episode grip level that is never observed — with every parameter in one
+`VehicleParams` dataclass so a *second* vehicle is one argument away. Full
+equations, parameter table, sensor model, and an explicit statement of what is
+**not** modelled (no slip angle, no tyre curve, no load transfer) in
+[`docs/source/physics.md`](docs/source/physics.md). The real vehicle models are
+in `scuderia_gym_jax`, one adapter away.
 
 **Four environments**, all partially observable by construction, none of which
 ever puts a velocity in the observation:
@@ -142,6 +152,60 @@ Three things this repo says that a results table would not:
   numbers here are on this repo's own small environments, not the paper's
   benchmark suite. For the authors' code and results, follow the arXiv links
   in [`papers/README.md`](papers/README.md).
+
+## Sim-to-real, without the real
+
+Train in simulation; deploy on a vehicle the simulator was wrong about (longer
+wheelbase, slower servo, **a steering trim that is not centred**, less grip,
+noisier lidar — nine parameters, none observable); keep learning while driving.
+
+| condition | return | sd | off-track |
+|---|---|---|---|
+| 1. sim → sim (the ceiling) | 439.0 | 83 | 30% |
+| 2. sim → real, **frozen** (the gap) | 367.9 | 118 | 38% |
+| 3. + RTRRL adapting on the vehicle | **399.9** | 123 | 36% |
+| 4. real from scratch, same total budget | **453.9** | 88 | 27% |
+
+*(4 seeds, 300k steps in sim + 150k on the vehicle. Crashed in 48% of episodes
+while adapting; **45% of the transfer gap closed online**.)*
+
+With a predictive safety filter around the on-vehicle phase:
+
+| condition | return | sd | off-track |
+|---|---|---|---|
+| 3. + RTRRL behind a filter, evaluated **naked** | 194.1 | 130 | 73% |
+| 3b. ...the same agent evaluated **with its filter** | 343.9 | 203 | **11%** |
+
+*(Crashed in 5% of episodes while adapting, against 48% unfiltered.)*
+
+Four things, and three of them are uncomfortable:
+
+**Online adaptation works, and it is modest.** 45% of the transfer gap closes
+in 150k on-vehicle steps. Real, reproducible, and not the tenfold result a
+headline would want.
+
+**Learning from scratch on the vehicle beat fine-tuning** at the same total
+budget (454 vs 400). On this task the pretraining bought nothing — the
+simulator's policy is a *worse* starting point than random, because it encodes
+a vehicle that does not exist. That is exactly the row this experiment was
+designed to be able to embarrass itself with, and on a real car you could never
+run it: you cannot spend 450k steps crashing. It is free here, so it gets run.
+
+**An agent that learns behind a safety filter learns to lean on it.** Trained
+filtered and then evaluated naked it scores 194 — far worse than never
+adapting at all. Evaluated *with* its filter, as it would actually be deployed,
+it scores 344 at an 11% off-track rate. Both numbers are true and reporting
+only the second would be dishonest; the gap between them is the size of the
+dependency it acquired.
+
+**The safety filter still did its job.** Crashes during adaptation fell from
+48% to 5%. If the vehicle is real, that trade — 400 → 344 in return, 48% → 5%
+in crashes — is not obviously the wrong one. If it is simulated, it clearly is.
+
+This is the deployment story from
+[Lemmel et al. 2026](https://arxiv.org/abs/2602.02236), with the vehicle
+replaced by a second simulator so it runs on a laptop. See
+[`tutorial/11`](tutorial/11_sim_to_real.py).
 
 ## Learning without crashing
 

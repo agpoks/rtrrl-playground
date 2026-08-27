@@ -49,16 +49,22 @@ from __future__ import annotations
 import numpy as np
 
 from rtrrl_playground.envs.track import Track, TRACKS
+from rtrrl_playground.envs.vehicle import VehicleParams
 from rtrrl_playground.spaces import Box, Discrete, Env
 
 # --- 1:10 RC scale, roughly a Traxxas Slash on a club track -----------------
-WHEELBASE = 0.33  # m
-STEER_MAX = 0.40  # rad -> 0.78 m minimum geometric turn radius
-STEER_TAU = 0.08  # s, first-order servo lag
-ACCEL_MAX = 4.0  # m/s^2
-SPEED_MAX = 4.0  # m/s
-DRAG = 0.15  # 1/s, rolling + aero, so coasting is not free
-A_LAT_MAX = 6.0  # m/s^2 -- about 0.6 g, an RC tyre on smooth concrete
+# These are the defaults of VehicleParams, re-exported as plain floats because
+# several modules want them that way. The *env* takes a VehicleParams object,
+# so a second vehicle with different numbers is one argument away -- which is
+# what tutorial/11 is built on.
+_P = VehicleParams()
+WHEELBASE = _P.wheelbase
+STEER_MAX = _P.steer_max
+STEER_TAU = _P.steer_tau
+ACCEL_MAX = _P.accel_max
+SPEED_MAX = _P.speed_max
+DRAG = _P.drag
+A_LAT_MAX = _P.a_lat_max
 
 # Beams point right-to-left: index 0 is 60 degrees to starboard, index 8 is 60
 # to port, index 4 is straight ahead. Worth stating once, because every scripted
@@ -80,7 +86,8 @@ class LaneKeep(Env):
 
     def __init__(self, track: str = "oval", action_mode: str = "discrete",
                  observe_speed: bool = False, half_width: float = 0.75,
-                 grip_range=(0.6, 1.4), dt: float = 0.05, max_steps: int = 600,
+                 grip_range=(0.6, 1.4), vehicle: VehicleParams | None = None,
+                 dt: float = 0.05, max_steps: int = 600,
                  start_jitter: float = 0.3, seed: int | None = None):
         if action_mode not in ("discrete", "continuous"):
             raise ValueError("action_mode must be 'discrete' or 'continuous'")
@@ -100,6 +107,7 @@ class LaneKeep(Env):
         # Set grip_range=(1.0, 1.0) to switch it off and get the reactive
         # version back.
         self.grip_range = (float(grip_range[0]), float(grip_range[1]))
+        self.vehicle = vehicle or VehicleParams()
         self.dt = float(dt)
         self.max_steps = int(max_steps)
         self.start_jitter = float(start_jitter)
@@ -134,11 +142,28 @@ class LaneKeep(Env):
             self.x, self.y, self.psi, BEAM_ANGLES,
             max_range=BEAM_RANGE, step=BEAM_STEP, obstacles=extra_obstacles,
         )
+        ranges = self._corrupt(ranges)
         parts = [ranges / BEAM_RANGE]
         if self.observe_speed:
-            parts.append(np.array([self.v / SPEED_MAX]))
+            parts.append(np.array([self.v / self.vehicle.speed_max]))
         self._last_beams = (ranges, flags)
         return np.concatenate(parts)
+
+    def _corrupt(self, ranges: np.ndarray) -> np.ndarray:
+        """Sensor defects, applied to the beams before the agent sees them.
+
+        Both default to off. A dropped beam returns ``BEAM_RANGE`` -- the same
+        value it returns when it genuinely sees nothing -- because that is what
+        a real lidar does, and it is what makes dropout worth simulating: the
+        agent cannot tell a miss from an empty corridor.
+        """
+        p = self.vehicle
+        if p.beam_noise > 0:
+            ranges = ranges + self._rng.normal(0.0, p.beam_noise, ranges.shape)
+        if p.beam_dropout > 0:
+            miss = self._rng.random(ranges.shape) < p.beam_dropout
+            ranges = np.where(miss, BEAM_RANGE, ranges)
+        return np.clip(ranges, 0.0, BEAM_RANGE)
 
     # -- Env --------------------------------------------------------------
     def reset(self, seed: int | None = None) -> np.ndarray:
@@ -182,12 +207,16 @@ class LaneKeep(Env):
         makes "how fast can I take this corner" a real question, and therefore
         makes the throttle half of the action space worth learning.
         """
-        self.delta += (steer * STEER_MAX - self.delta) * self.dt / STEER_TAU
-        self.v += (throttle * ACCEL_MAX - DRAG * self.v) * self.dt
-        self.v = float(np.clip(self.v, 0.0, SPEED_MAX))
-        psi_dot = self.v / WHEELBASE * np.tan(self.delta)
+        p = self.vehicle
+        # steer_bias is a servo trim that is not quite centred: the commanded
+        # zero is not the car's zero. It is the single most common real defect
+        # and the one a policy trained in simulation has never seen.
+        self.delta += (steer * p.steer_max + p.steer_bias - self.delta) * self.dt / p.steer_tau
+        self.v += (throttle * p.accel_max * p.throttle_scale - p.drag * self.v) * self.dt
+        self.v = float(np.clip(self.v, 0.0, p.speed_max))
+        psi_dot = self.v / p.wheelbase * np.tan(self.delta)
         if self.v > 1e-3:
-            grip_limit = A_LAT_MAX * self.grip / self.v
+            grip_limit = p.a_lat_max * self.grip / self.v
             psi_dot = float(np.clip(psi_dot, -grip_limit, grip_limit))
         self.x += self.v * np.cos(self.psi) * self.dt
         self.y += self.v * np.sin(self.psi) * self.dt

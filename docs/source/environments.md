@@ -1,5 +1,8 @@
 # The environments
 
+The *dynamics* these run on are documented separately in {doc}`physics`;
+this page is about what each task asks of an agent.
+
 Four, all partially observable **by construction**: no velocity is ever in an
 observation. That is not a difficulty knob, it is the premise -- an RC car's
 sensors give you positions and your decisions need rates.

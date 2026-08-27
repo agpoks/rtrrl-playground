@@ -70,6 +70,7 @@ import numpy as np
 from rtrrl_playground.envs.lanekeep import (
     A_LAT_MAX, ACCEL_MAX, DRAG, SPEED_MAX, STEER_MAX, STEER_TAU, WHEELBASE,
 )
+from rtrrl_playground.envs.vehicle import VehicleParams
 
 
 class BicycleModel:
@@ -82,18 +83,25 @@ class BicycleModel:
     simulator would be predicting nothing.
     """
 
-    def __init__(self, dt: float = 0.05, grip: float = 1.0):
+    def __init__(self, dt: float = 0.05, grip: float = 1.0,
+                 params: VehicleParams | None = None):
         self.dt, self.grip = float(dt), float(grip)
+        # The filter's *belief* about the car, which need not be the car. This
+        # is the same mismatch as `grip`, generalised: hand it the simulator's
+        # parameters while the plant is a different vehicle and you get exactly
+        # the situation a filter faces on real hardware.
+        self.params = params or VehicleParams()
 
     def step(self, s: np.ndarray, steer, throttle) -> np.ndarray:
         """``s = [x, y, psi, v, delta]`` -> next state. Mirrors ``LaneKeep._integrate``."""
+        p = self.params
         x, y, psi, v, delta = s.T
         steer = np.asarray(steer, dtype=np.float64)
         throttle = np.asarray(throttle, dtype=np.float64)
-        delta = delta + (steer * STEER_MAX - delta) * self.dt / STEER_TAU
-        v = np.clip(v + (throttle * ACCEL_MAX - DRAG * v) * self.dt, 0.0, SPEED_MAX)
-        psi_dot = v / WHEELBASE * np.tan(delta)
-        limit = np.where(v > 1e-3, A_LAT_MAX * self.grip / np.maximum(v, 1e-3), np.inf)
+        delta = delta + (steer * p.steer_max - delta) * self.dt / p.steer_tau
+        v = np.clip(v + (throttle * p.accel_max - p.drag * v) * self.dt, 0.0, p.speed_max)
+        psi_dot = v / p.wheelbase * np.tan(delta)
+        limit = np.where(v > 1e-3, p.a_lat_max * self.grip / np.maximum(v, 1e-3), np.inf)
         psi_dot = np.clip(psi_dot, -limit, limit)
         return np.stack([x + v * np.cos(psi) * self.dt,
                          y + v * np.sin(psi) * self.dt,
@@ -124,6 +132,7 @@ class PredictiveSafetyFilter:
 
     def __init__(self, track, horizon: int = 25, dt: float = 0.05,
                  predict_dt_scale: float = 1.0, assumed_grip: float = 1.0,
+                 assumed_vehicle: VehicleParams | None = None,
                  margin: float = 0.05, stop_speed: float = 0.25,
                  obstacle_radius: float = 0.44, credit: str = "executed",
                  n_actions: int = 9):
@@ -132,8 +141,11 @@ class PredictiveSafetyFilter:
         self.track = track
         self.dt = float(dt)
         self.predict_dt = float(dt) * float(predict_dt_scale)
-        self.model = BicycleModel(dt=self.predict_dt, grip=assumed_grip)
-        self._first = BicycleModel(dt=float(dt), grip=assumed_grip)
+        self.assumed_vehicle = assumed_vehicle or VehicleParams()
+        self.model = BicycleModel(dt=self.predict_dt, grip=assumed_grip,
+                                  params=self.assumed_vehicle)
+        self._first = BicycleModel(dt=float(dt), grip=assumed_grip,
+                                   params=self.assumed_vehicle)
         self._brake = np.full(n_actions, -1.0)
         self.horizon, self.margin = int(horizon), float(margin)
         self.stop_speed, self.obstacle_radius = float(stop_speed), float(obstacle_radius)
@@ -257,17 +269,21 @@ class PredictiveSafetyFilter:
         hw = t.half_width - self.margin if self.margin > 0 else float("inf")
         r2 = self.obstacle_radius ** 2
         grip, dt, pdt = self.assumed_grip, self.dt, self.predict_dt
+        vp = self.assumed_vehicle
+        steer_max, steer_tau = vp.steer_max, vp.steer_tau
+        accel_max, speed_max, drag = vp.accel_max, vp.speed_max, vp.drag
+        wheelbase, a_lat_max = vp.wheelbase, vp.a_lat_max
 
         x, y, psi, v, delta = (float(q) for q in state)
         steer, thr, h = float(self._grid[action, 0]), float(self._grid[action, 1]), dt
 
         for step in range(self.horizon):
-            delta += (steer * STEER_MAX - delta) * h / STEER_TAU
-            v += (thr * ACCEL_MAX - DRAG * v) * h
-            v = 0.0 if v < 0.0 else (SPEED_MAX if v > SPEED_MAX else v)
-            psi_dot = v / WHEELBASE * math.tan(delta)
+            delta += (steer * steer_max - delta) * h / steer_tau
+            v += (thr * accel_max - drag * v) * h
+            v = 0.0 if v < 0.0 else (speed_max if v > speed_max else v)
+            psi_dot = v / wheelbase * math.tan(delta)
             if v > 1e-3:
-                lim = A_LAT_MAX * grip / v
+                lim = a_lat_max * grip / v
                 psi_dot = -lim if psi_dot < -lim else (lim if psi_dot > lim else psi_dot)
             x += v * math.cos(psi) * h
             y += v * math.sin(psi) * h
@@ -295,7 +311,7 @@ class PredictiveSafetyFilter:
                 break
             psi_ref = math.atan2(tky, tkx)
             err = math.atan2(math.sin(psi_ref - psi), math.cos(psi_ref - psi))
-            steer = (err - 1.2 * d) / STEER_MAX
+            steer = (err - 1.2 * d) / steer_max
             steer = -1.0 if steer < -1.0 else (1.0 if steer > 1.0 else steer)
             thr, h = -1.0, pdt
         return v <= self.stop_speed
@@ -409,8 +425,17 @@ class SafeAgent:
         return pol
 
 
-def make_safe(agent, env, credit: str = "executed", **filter_kwargs):
-    """Wrap ``agent`` with a filter that reads ``env``'s state and traffic."""
+def make_safe(agent, env, credit: str = "executed", assume_env_vehicle: bool = True,
+              **filter_kwargs):
+    """Wrap ``agent`` with a filter that reads ``env``'s state and traffic.
+
+    ``assume_env_vehicle`` gives the filter the environment's own parameters --
+    a filter that knows the car exactly. Pass ``False``, or an explicit
+    ``assumed_vehicle=``, to give it a *different* belief, which is the
+    realistic case and the one ``tutorial/11`` uses.
+    """
+    if assume_env_vehicle:
+        filter_kwargs.setdefault("assumed_vehicle", getattr(env, "vehicle", None))
     filt = PredictiveSafetyFilter(env.track, dt=env.dt, credit=credit, **filter_kwargs)
 
     def state_fn():

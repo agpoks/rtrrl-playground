@@ -17,6 +17,7 @@ the one you want.
 | 8 | [`08_to_scuderia_gym_jax.py`](08_to_scuderia_gym_jax.py) | Swap the toy vehicle for `scuderia_gym_jax`'s real ST/STD models, and what changes when you do. | varies |
 | 9 | [`09_clone_from_a_real_bag.py`](09_clone_from_a_real_bag.py) | Clone a real driver from a ROS 2 recording, and rebuild the circuit it was recorded on. Needs `--bag`; no data ships here. | ~5 min |
 | 10 | [`10_safety_filter.py`](10_safety_filter.py) | A predictive safety filter from scratch: never leave the track while learning, and what that costs. | ~10 min |
+| 11 | [`11_sim_to_real.py`](11_sim_to_real.py) | Train in simulation, deploy on a vehicle the simulator was wrong about, close the gap online. | ~15 min |
 
 Every lesson takes `--help`. Runtimes are for a laptop CPU at the default
 `--steps`; all of them take a smaller number.
@@ -34,3 +35,5 @@ Every lesson takes `--help`. Runtimes are for a laptop CPU at the default
 6. Then move it onto real vehicle dynamics (8), and onto real recorded data (9).
 7. And if it is going to learn on a real vehicle, it must not crash it while
    learning (10).
+8. Which is the whole point: a policy trained in a simulator meets a vehicle
+   the simulator was wrong about, and fixes itself while driving (11).

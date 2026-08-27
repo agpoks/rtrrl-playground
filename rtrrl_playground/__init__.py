@@ -20,7 +20,8 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from rtrrl_playground.spaces import Box, Discrete
-from rtrrl_playground.envs import make_env, ENV_IDS
+from rtrrl_playground.envs import make_env, ENV_IDS, REAL_VEHICLE, VehicleParams
 from rtrrl_playground.utils.seed import set_seed
 
-__all__ = ["Box", "Discrete", "make_env", "ENV_IDS", "set_seed", "__version__"]
+__all__ = ["Box", "Discrete", "make_env", "ENV_IDS", "VehicleParams",
+           "REAL_VEHICLE", "set_seed", "__version__"]

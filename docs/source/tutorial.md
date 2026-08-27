@@ -14,6 +14,9 @@ from one lesson into another.
 | 6 | `06_learn_to_overtake.py` | The same car plus traffic whose speed is never observed. |
 | 7 | `07_finetune_a_controller.py` | Clone offline, improve online while driving -- Lemmel et al. (2026) in miniature. |
 | 8 | `08_to_scuderia_gym_jax.py` | Swap the toy vehicle for real ST/STD models. |
+| 9 | `09_clone_from_a_real_bag.py` | Clone a real driver from a ROS 2 recording. |
+| 10 | `10_safety_filter.py` | A predictive safety filter: never crash while learning. |
+| 11 | `11_sim_to_real.py` | Deploy on a vehicle the simulator was wrong about, and adapt online. |
 
 ## The shape of the argument
 

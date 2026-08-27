@@ -44,8 +44,9 @@ class Overtake(LaneKeep):
                  opp_gap: float = 6.0, opp_lateral: float = 0.0,
                  track: str = "oval", action_mode: str = "discrete",
                  observe_speed: bool = False, half_width: float = 0.95,
-                 grip_range=(0.6, 1.4), dt: float = 0.05, max_steps: int = 900,
-                 start_jitter: float = 0.2, seed: int | None = None):
+                 grip_range=(0.6, 1.4), vehicle=None, dt: float = 0.05,
+                 max_steps: int = 900, start_jitter: float = 0.2,
+                 seed: int | None = None):
         # A wider track than LaneKeep's, and not by accident: a pass needs the
         # two cars to be more than 2*CAR_RADIUS apart laterally while both stay
         # inside the boundary, which 0.75 m of half-width does not comfortably
@@ -53,7 +54,7 @@ class Overtake(LaneKeep):
         # opponent's slipstream and wait for a corner exit instead.
         super().__init__(track=track, action_mode=action_mode,
                          observe_speed=observe_speed, half_width=half_width,
-                         grip_range=grip_range, dt=dt, max_steps=max_steps,
+                         grip_range=grip_range, vehicle=vehicle, dt=dt, max_steps=max_steps,
                          start_jitter=start_jitter, seed=seed)
         self.n_opponents = int(n_opponents)
         self.opp_speed_range = tuple(opp_speed_range)
@@ -85,9 +86,9 @@ class Overtake(LaneKeep):
             obstacles=xy, obs_radius=SEE_RADIUS,
         )
         self._last_beams = (ranges, flags)
-        parts = [ranges / BEAM_RANGE, flags]
+        parts = [self._corrupt(ranges) / BEAM_RANGE, flags]
         if self.observe_speed:
-            parts.append(np.array([self.v / SPEED_MAX]))
+            parts.append(np.array([self.v / self.vehicle.speed_max]))
         return np.concatenate(parts)
 
     # -- Env --------------------------------------------------------------
