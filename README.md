@@ -53,6 +53,9 @@ matching notebook:
 | 9 | [Clone from a real bag](tutorial/09_clone_from_a_real_bag.py) | Clone a real driver from a ROS 2 recording, and rebuild the circuit it was recorded on. |
 | 10 | [Safety filter](tutorial/10_safety_filter.py) | A predictive safety filter from scratch: never leave the track *while learning*, and what that costs. |
 | 11 | [Sim-to-real](tutorial/11_sim_to_real.py) | Train in simulation, deploy on a vehicle the simulator was wrong about, and close the gap online. |
+| 12 | [Cells from scratch](tutorial/12_cells_from_scratch.py) | LiGRU, LRCU and LiquidGRU in twenty lines each, every Jacobian checked. |
+| 13 | [Filters from scratch](tutorial/13_filters_from_scratch.py) | Both safety filters from scratch, and what really separates them. |
+| 14 | [Models from scratch](tutorial/14_models_from_scratch.py) | The vehicle and sensor models derived, and each checked against a fact the code does not know. |
 
 ## What is in the box
 

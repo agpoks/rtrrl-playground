@@ -188,6 +188,18 @@ criterion**, which is what makes the comparison below clean.
 
 ### The barrier matters more than the method
 
+```{image} _static/plots/barrier.png
+:alt: the two barriers, as safe sets over the track
+:width: 100%
+```
+
+Above: $h(x)$ over the track for a car at 3 m/s pointed 25° off the path, black
+line at $h=0$. On the left the safe set is the whole corridor -- a pure
+position constraint, blind to the fact that the car is *moving at a wall*. On
+the right it has collapsed to two islands on the straights, which is what a car
+in that state genuinely has.
+
+
 The obvious barrier for staying on a track is $h = w - |d|$, with $d$ the
 lateral offset. It is also **myopic**: it permits driving flat out straight at
 a wall until the step before contact, because until then $h$ is still positive

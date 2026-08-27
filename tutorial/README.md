@@ -19,6 +19,8 @@ the one you want.
 | 10 | [`10_safety_filter.py`](10_safety_filter.py) | A predictive safety filter from scratch: never leave the track while learning, and what that costs. | ~10 min |
 | 11 | [`11_sim_to_real.py`](11_sim_to_real.py) | Train in simulation, deploy on a vehicle the simulator was wrong about, close the gap online. | ~15 min |
 | 12 | [`12_cells_from_scratch.py`](12_cells_from_scratch.py) | LiGRU, LRCU and LiquidGRU written out in twenty lines each: equations, papers, hand-derived Jacobians, finite-difference checks. | seconds |
+| 13 | [`13_filters_from_scratch.py`](13_filters_from_scratch.py) | Both safety filters from scratch, and the two experiments that show what really separates them. | ~2 min |
+| 14 | [`14_models_from_scratch.py`](14_models_from_scratch.py) | The vehicle and sensor models derived, implemented and each checked against a fact the code does not know. | seconds |
 
 Every lesson takes `--help`. Runtimes are for a laptop CPU at the default
 `--steps`; all of them take a smaller number.

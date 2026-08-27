@@ -18,6 +18,8 @@ from one lesson into another.
 | 10 | `10_safety_filter.py` | A predictive safety filter: never crash while learning. |
 | 11 | `11_sim_to_real.py` | Deploy on a vehicle the simulator was wrong about, and adapt online. |
 | 12 | `12_cells_from_scratch.py` | LiGRU, LRCU and LiquidGRU from scratch: equations, papers, derivatives, checks. |
+| 13 | `13_filters_from_scratch.py` | Both safety filters from scratch, with the barrier plotted as a safe set. |
+| 14 | `14_models_from_scratch.py` | The vehicle and sensor models derived and independently checked. |
 
 ## The shape of the argument
 
