@@ -175,6 +175,41 @@ An obvious next thing to try, untested: give the reserved units the *relative*
 dynamics — integrate the flagged obstacle beams to estimate a closing rate —
 rather than the ego's own.
 
+### A second try: give the known block an *exact* gradient
+
+One explanation for the null above is that the prior is fine and the *credit
+assignment to it* is not. `physics_ligru` reserves a block whose dynamics are
+written down rather than learned, so unlike the rest of the network its
+influence on the loss can be computed exactly — RFLO's diagonal approximation
+is not forced on it. `estimator="hybrid"` does that: exact RTRL on the known
+block, RFLO everywhere else.
+
+It works, in the sense that the gradient really is exact:
+
+| gradient w.r.t. the known block's parameters | max abs error vs exact RTRL |
+|---|---|
+| `hybrid` | **1.4e-17** |
+| `rflo` | 7.5e-02 |
+
+at a memory cost between the two — 14.3 KB of influence carried against RTRL's
+28.7 KB and RFLO's 3.6 KB. `tests/test_gradients.py` asserts all three.
+
+And it changes nothing:
+
+| task | `rflo` | `hybrid` | difference |
+|---|---|---|---|
+| lanekeep | 461 ± 99 | 454 ± 87 | −6.8, 0.1 SE |
+| overtake (return) | 426 ± 296 | 378 ± 188 | −48, 0.3 SE |
+| overtake (passes) | 2.07 | 1.69 | −0.38 |
+
+*(6 seeds each. Not separated.)*
+
+So the null is not an artefact of the approximate gradient. **A better gradient
+on the right block did not produce a better policy**, which is worth saying
+plainly because the opposite is the natural assumption — and because the same
+reasoning is the whole premise of the estimator zoo. Exactness is a property of
+the gradient, not of the policy, and on these tasks the two came apart.
+
 **What it is not:** a full observer. No correction step, nothing compares the
 prediction against the beams, no Kalman filter. It is open-loop dead reckoning
 of the commanded input, offered to the learned units as three features they
