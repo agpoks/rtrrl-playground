@@ -89,6 +89,12 @@ is worth simulating: the agent cannot tell a miss from open space.
 
 ## The sensor
 
+```{image} _static/plots/observation.png
+:alt: nine beams and the resulting observation vector
+:width: 100%
+```
+
+
 Nine beams over ±60°, ray-marched at 15 cm steps out to 5 m against a
 **rasterised occupancy bitmap** of the track, not against its geometry. That is
 the same thing `f1tenth_gym` and `scuderia_gym_jax` do, so it is a step towards

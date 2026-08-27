@@ -1,5 +1,10 @@
 # The environments
 
+```{image} _static/plots/tracks.png
+:alt: the two tracks, coloured by corner radius
+:width: 100%
+```
+
 The *dynamics* these run on are documented separately in {doc}`physics`;
 this page is about what each task asks of an agent.
 
@@ -67,6 +72,8 @@ is a decent speed controller by itself. `lanekeep` is where you check that an
 agent can drive at all.
 
 ## Overtake -- "learn to overtake"
+
+The method gets its own page: {doc}`overtake_method`.
 
 `lanekeep` plus two slower cars holding the racing line. They do not brake, do
 not steer and do not react -- the same dumb traffic as `scuderia_gym_jax`'s

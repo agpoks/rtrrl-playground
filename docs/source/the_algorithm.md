@@ -76,6 +76,22 @@ the from-scratch lesson (which got the order right) and the library agent
 (which did not). The fix is why `algo.py` computes `dW = cell.grad(g)` on the
 line *before* `cell.step(...)`, with a comment saying so.
 
+## What it looks like
+
+```{image} _static/plots/lanekeep.png
+:alt: a scripted driver and a learned one, coloured by speed
+:width: 100%
+```
+
+Both lift in the corners -- yellow on the straights, green through the turns.
+The learned agent found that trade-off without ever observing its own speed.
+
+```{image} _static/plots/learning_curve.png
+:alt: return against environment steps
+:width: 85%
+:align: center
+```
+
 ## What it is not
 
 A reproduction. This is a compact reimplementation for taking apart, on small

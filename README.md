@@ -20,6 +20,14 @@ same layout and the same philosophy: every mechanism is hand-written from
 primitives. Here that means literally every derivative. **Nothing in the online
 agents calls `.backward()`**, because not calling it is the point.
 
+<p align="center">
+  <img src="docs/source/_static/plots/lanekeep.png" alt="lanekeep: a scripted driver and a learned one" width="100%">
+</p>
+
+*Left: a hand-written wall-follower. Right: RTRRL after learning online, one
+update per timestep. Colour is speed — both lift in the corners, and the agent
+found that without ever observing its own speed.*
+
 ## Start here
 
 ```bash
@@ -208,6 +216,17 @@ This is the deployment story from
 [Lemmel et al. 2026](https://arxiv.org/abs/2602.02236), with the vehicle
 replaced by a second simulator so it runs on a laptop. See
 [`tutorial/11`](tutorial/11_sim_to_real.py).
+
+## Overtaking
+
+<p align="center">
+  <img src="docs/source/_static/plots/overtake.png" alt="overtake: a pass, and a crash" width="100%">
+</p>
+
+*Same four passes each. The scripted overtaker crashes (red X) because it
+commits to a side from a single frame and cannot tell how fast it is closing;
+the learned policy completes the episode clean. Method:
+[`docs/source/overtake_method.md`](docs/source/overtake_method.md).*
 
 ## Learning without crashing
 
