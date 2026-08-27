@@ -63,7 +63,7 @@ python algos/rtrrl/example.py --env overtake --cell ltc --estimator rtrl --feedb
 | `ltc` | the time constant becomes a function of the input -- *liquid* | [Hasani et al. 2021](https://arxiv.org/abs/2006.04439) |
 | `lrcu` | the *capacitance* becomes one too -- the cell the RTRRL hardware paper recommends | [Farsang et al. 2024](https://arxiv.org/abs/2403.08791) |
 | `ligru` | gating without continuous time, as the control | [Ravanelli et al. 2018](https://arxiv.org/abs/1803.10225) |
-| `liquid_gru` | a GRU gate read as a *conductance* with a leak floor, so the influence series converges without a numerical cap | this repo's own |
+| `liquid_gru` | a GRU gate read as a *conductance* with a leak floor, so the influence series converges without a numerical cap ([derived from scratch in lesson 12](tutorial/12_cells_from_scratch.py)) | this repo's own |
 | `mlp` | no recurrence at all, as the other control | -- |
 
 | `--estimator` | what it carries | memory | bias |

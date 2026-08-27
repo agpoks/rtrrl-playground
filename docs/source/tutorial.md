@@ -17,6 +17,7 @@ from one lesson into another.
 | 9 | `09_clone_from_a_real_bag.py` | Clone a real driver from a ROS 2 recording. |
 | 10 | `10_safety_filter.py` | A predictive safety filter: never crash while learning. |
 | 11 | `11_sim_to_real.py` | Deploy on a vehicle the simulator was wrong about, and adapt online. |
+| 12 | `12_cells_from_scratch.py` | LiGRU, LRCU and LiquidGRU from scratch: equations, papers, derivatives, checks. |
 
 ## The shape of the argument
 

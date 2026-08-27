@@ -47,6 +47,26 @@ Same agent, same settings, only the recurrent unit changes. 3 seeds.
 | `lrcu` | **+0.889** ± 0.040 | 256 ± 181 |
 | `ligru` | +0.883 ± 0.037 | **468** ± 71 |
 | `liquid_gru` | +0.775 ± 0.090 | 372 ± 99 |
+
+**Three seeds is not enough to rank the top of that table**, and re-running the
+closest pair at eight seeds changed the conclusion:
+
+| task | `ligru` | `liquid_gru` | difference |
+|---|---|---|---|
+| MemoryChain-8 (optimum +1.0) | **+0.835** ± 0.092 | +0.565 ± 0.322 | +0.27, **2.1 SE — separated** |
+| lanekeep | 436 ± 87 | 337 ± 158 | +99, 1.5 SE — **not separated** |
+
+*(8 seeds each. SE is the standard error of the difference of means.)*
+
+So: LiGRU is genuinely better **on the memory task**, and on the driving task
+the two are **not distinguishable at eight seeds** — an earlier three-seed run
+here claimed otherwise and was wrong.
+
+The per-seed numbers say something the means hide. `liquid_gru` on
+MemoryChain-8 is **bimodal**: `[0.84, 0.83, 0.65, 0.62, -0.00, 0.65, 0.06, 0.86]`.
+Five of eight seeds land between 0.62 and 0.86; two collapse to zero. It is not
+uniformly worse than LiGRU, it is *less reliable* — which is a different defect
+and points at initialisation rather than at the update equation.
 | `ctrnn` | +0.263 ± 0.399 | 405 ± 117 |
 | `ltc` | +0.011 ± 0.019 | 301 ± 216 |
 | `mlp` (no memory) | −0.005 ± 0.018 | 445 ± 75 |

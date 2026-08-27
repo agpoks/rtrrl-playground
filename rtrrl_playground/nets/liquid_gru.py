@@ -93,11 +93,29 @@ On ``lanekeep`` the same three settings give 351 / 313 / 372 -- all inside the
 seed spread, so the long time constants cost nothing on a task that does not
 need deep memory. Hence the default of ``(10, 50)``.
 
-**Being straight about the outcome: this cell does not win.** LiGRU beats it on
-both tasks (+0.883 vs +0.775 on MemoryChain, 468 vs 372 on lanekeep). What it
-has is a property neither of them has -- an influence series that provably
-converges without a numerical cap -- and a measured price for it. That is worth
-a file; it is not worth a claim.
+**Being straight about the outcome: this cell does not win**, and the shape of
+the loss took eight seeds to see rather than three.
+
+===================  =================  ==================  ===================
+task                 ``ligru``          ``liquid_gru``      difference
+===================  =================  ==================  ===================
+MemoryChain-8        +0.835 +/- 0.092   +0.565 +/- 0.322    +0.27, 2.1 SE
+lanekeep                436 +/- 87         337 +/- 158      +99, 1.5 SE
+===================  =================  ==================  ===================
+
+LiGRU is genuinely better on the memory task. On the driving task the two are
+**not separated** at eight seeds -- an earlier three-seed run said otherwise and
+was wrong.
+
+And the per-seed numbers say what the means hide. On MemoryChain-8 this cell is
+*bimodal*: ``[0.84, 0.83, 0.65, 0.62, -0.00, 0.65, 0.06, 0.86]``. Five seeds of
+eight land between 0.62 and 0.86; two collapse to zero. It is not uniformly
+worse, it is **less reliable** -- a different defect, and one that points at the
+initialisation rather than at the update equation.
+
+What it has that neither LiGRU nor LRCU has is an influence series that provably
+converges without a numerical cap, and a measured price for it. That is worth a
+file; it is not worth a claim.
 """
 
 from __future__ import annotations
