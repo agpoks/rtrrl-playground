@@ -90,7 +90,9 @@ have produced a near-duplicate of `rflo` and obscured that.
 | 20 | Wabersich, Zeilinger — **A predictive safety filter for learning-based control of constrained nonlinear dynamical systems** | Automatica 2021 | [arXiv:1812.05506](https://arxiv.org/abs/1812.05506) | [`safety.py`](../rtrrl_playground/safety.py) |
 | 21 | Wabersich, Zeilinger — **Linear model predictive safety certification for learning-based control** | CDC 2018 | [arXiv:1803.08552](https://arxiv.org/abs/1803.08552) | the same idea, linear |
 | 22 | Hewing, Wabersich, Menner, Zeilinger — **Learning-Based Model Predictive Control: Toward Safe Learning in Control** | Annu. Rev. Control 2020 | — | the survey |
-| 23 | Ames, Coogan, Egerstedt, Notomista, Sreenath, Tabuada — **Control Barrier Functions: Theory and Applications** | ECC 2019 | [arXiv:1903.11199](https://arxiv.org/abs/1903.11199) | the alternative |
+| 23 | Ames, Coogan, Egerstedt, Notomista, Sreenath, Tabuada — **Control Barrier Functions: Theory and Applications** | ECC 2019 | [arXiv:1903.11199](https://arxiv.org/abs/1903.11199) | [`cbf.py`](../rtrrl_playground/cbf.py) |
+| 23b | Ames, Xu, Grizzle, Tabuada — **Control Barrier Function Based Quadratic Programs for Safety Critical Systems** | IEEE TAC 2017 | — | the QP form |
+| 23c | Agrawal, Sreenath — **Discrete Control Barrier Functions for Safety-Critical Control of Discrete Systems** | RSS 2017 | — | the discrete-time condition used here |
 | 24 | García, Fernández — **A Comprehensive Survey on Safe Reinforcement Learning** | JMLR 2015 | — | the field |
 
 (20) is what [`rtrrl_playground/safety.py`](../rtrrl_playground/safety.py)
@@ -101,13 +103,16 @@ nearest action for which the answer is yes. The learner is untouched in the
 interior and constrained only at the boundary, which is why a competent policy
 is filtered on ~0% of steps while a random one never leaves the track.
 
-**(23) is the pointwise alternative** and is deliberately not implemented here.
-A control barrier function certifies safety through a scalar function of the
-current state with no prediction at all; a predictive filter certifies it by
-exhibiting a trajectory. The trade is offline design effort (finding a valid
-CBF) against online compute (rolling out a backup), and on a task where the
-constraint is a bitmap rather than an analytic set, exhibiting the trajectory
-is much easier than finding the function.
+**(23) is the pointwise alternative**, and both are implemented so they can be
+compared on the same task, action set, model and wrapper. A CBF certifies
+safety by evaluating a scalar function of the current state; a predictive
+filter certifies it by exhibiting a trajectory. Measured, the difference is
+*not* that one is safer — the barrier design carries the safety, and a naive
+positional barrier fails at 47% where the same method with a closing-rate term
+does not fail at all. The differences that are real: the pointwise method is
+structurally more conservative (a one-step condition cannot tell that a plan
+exists), and their cost profiles are opposite. See
+[`docs/source/safety.md`](../docs/source/safety.md).
 
 ## The environments
 

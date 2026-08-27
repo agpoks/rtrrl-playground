@@ -132,3 +132,95 @@ def test_filter_respects_obstacles():
     ahead = np.array([[env.x + d * np.cos(env.psi), env.y + d * np.sin(env.psi)]
                       for d in (0.6, 0.9, 1.2)])
     assert not filt._certify_scalar(state, 5, ahead), "drove through a car"
+
+
+# --- control barrier functions ---------------------------------------------
+
+def test_cbf_keeps_a_random_policy_on_the_track():
+    """Same falsifiable job as the predictive filter, different criterion."""
+    from rtrrl_playground.cbf import DiscreteCBFFilter
+
+    env = make_env("lanekeep")
+    rng = np.random.default_rng(0)
+    policy = lambda obs: int(rng.integers(9))  # noqa: E731
+
+    filt = DiscreteCBFFilter(env.track, dt=env.dt, h_kind="braking")
+    off, _ret, _iv = _drive(env, filt, policy, n_ep=8)
+    assert off == 0, f"the CBF let {off} episodes off the track"
+
+
+def test_naive_positional_barrier_is_myopic():
+    """h = w - |d| cannot see a braking distance, and this asserts it.
+
+    Not a bug in the method -- a statement about the barrier, and the reason
+    ``h_kind="braking"`` exists. If this test ever passes with zero crashes the
+    demonstration is gone and the docs claim needs re-checking.
+    """
+    from rtrrl_playground.cbf import DiscreteCBFFilter
+
+    env = make_env("lanekeep")
+    rng = np.random.default_rng(0)
+    policy = lambda obs: int(rng.integers(9))  # noqa: E731
+
+    naive = DiscreteCBFFilter(env.track, dt=env.dt, h_kind="lateral")
+    off_naive, _r, _i = _drive(env, naive, policy, n_ep=10)
+
+    rng = np.random.default_rng(0)
+    good = DiscreteCBFFilter(env.track, dt=env.dt, h_kind="braking")
+    off_good, _r, _i = _drive(env, good, policy, n_ep=10)
+
+    assert off_naive > off_good, (
+        f"the naive barrier crashed {off_naive} times and the closing-rate one "
+        f"{off_good}: the myopia this pair exists to demonstrate is not showing")
+
+
+def test_cbf_is_forward_invariant_on_its_own_condition():
+    """Whenever the filter accepts an action, the CBF inequality must hold."""
+    from rtrrl_playground.cbf import DiscreteCBFFilter
+
+    env = make_env("lanekeep")
+    filt = DiscreteCBFFilter(env.track, dt=env.dt, h_kind="braking")
+    rng = np.random.default_rng(3)
+    obs = env.reset(seed=0)
+    checked = 0
+    for _ in range(600):
+        state = np.array([env.x, env.y, env.psi, env.v, env.delta])
+        h_now = float(filt.h(state)[0])
+        a, _iv = filt(state, int(rng.integers(9)))
+        nxt = filt.model.step(state[None, :], filt._grid[a, 0:1], filt._grid[a, 1:2])
+        h_next = float(filt.h(nxt)[0])
+        if h_now > 0 and filt.n_no_safe_action == 0:
+            assert h_next >= (1 - filt.alpha) * h_now - 1e-9, (
+                f"accepted an action violating the CBF condition: "
+                f"h {h_now:.4f} -> {h_next:.4f}")
+            checked += 1
+        obs, r, te, tr, _i = env.step(a)
+        if te or tr:
+            env.reset()
+    assert checked > 100
+
+
+def test_cbf_wraps_an_agent_and_trains():
+    from rtrrl_playground.cbf import make_safe_cbf
+    from rtrrl_playground.train import train
+
+    env = make_env("lanekeep")
+    agent = load_algo("rtrrl")(env.obs_dim, env.action_space, seed=0)
+    safe = make_safe_cbf(agent, env)
+    out = train(env, safe, 400, progress=False, seed=0)
+    assert out["steps"] == 400
+    ev = rollout(env, safe.eval_policy(), n_episodes=2, seed=1)
+    assert len(ev["returns"]) == 2
+
+
+def test_cbf_respects_obstacles():
+    from rtrrl_playground.cbf import DiscreteCBFFilter
+
+    env = make_env("overtake")
+    env.reset(seed=0)
+    filt = DiscreteCBFFilter(env.track, dt=env.dt, h_kind="braking")
+    state = np.array([env.x, env.y, env.psi, env.v, env.delta])
+    ahead = np.array([[env.x + d * np.cos(env.psi), env.y + d * np.sin(env.psi)]
+                      for d in (0.3, 0.5)])
+    assert filt.h(state, ahead)[0] < filt.h(state, None)[0], \
+        "a car right in front did not lower the barrier"

@@ -271,6 +271,31 @@ finished with the highest return — an episode that ends in a wall is an episod
 that stopped paying. The optimistic one is worse than no filter at all. A
 safety filter inherits its guarantee from its model and nothing else.
 
+### And the pointwise alternative
+
+`rtrrl_playground/cbf.py` implements a **control barrier function** filter
+([Ames et al.](https://arxiv.org/abs/1903.11199), discrete-time form from
+Agrawal & Sreenath) — same wrapper, same actions, same model, different
+criterion: one algebraic inequality instead of a 25-step rollout.
+
+| filter | random policy off-track | competent policy overridden | filter µs |
+|---|---|---|---|
+| none | 100% | — | — |
+| CBF, naive barrier `w−|d|` | **47%** | — | 264 |
+| CBF, closing-rate barrier | **0%** | 8.7% | 279 |
+| predictive, 25-step rollout | **0%** | **0.0%** | 172 |
+
+Three things that table says, none of them the usual summary:
+
+- **The barrier carries the safety, not the method.** A naive positional
+  barrier fails at 47%; the same method with a closing-rate term does not fail.
+- **The pointwise filter is structurally more conservative** — a one-step
+  condition cannot tell that a *plan* exists, so it clips 8.7% of the actions
+  of a driver that was never going to crash.
+- **The cost profiles are opposite**: the CBF is ~2× cheaper when it must
+  intervene and ~1.6× more expensive when it need not — which on a vehicle
+  running a usually-right policy favours the rollout.
+
 It is also honest about what it cannot do: it is privileged (it reads the
 state, not the agent's beams), it does not know the hidden grip either
 (`assumed_grip` too high and crashes happen *through* it — there is a test that

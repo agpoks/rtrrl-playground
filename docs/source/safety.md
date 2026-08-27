@@ -1,4 +1,14 @@
-# The safety filter
+# Safe learning
+
+Learning by trial and error means, definitionally, making the errors. On a
+simulated car that is free; on a real one it is a broken car, and it is the
+single biggest reason online RL does not get deployed.
+
+Two answers are implemented here, opposites in method: one certifies safety by
+**exhibiting a plan**, the other by **evaluating a function**. Both wrap an
+agent identically, so they can be compared on the same task, the same nine
+actions and the same model.
+
 
 Learning by trial and error means, definitionally, making the errors. On a
 simulated car that is free; on a real one it is a broken car, and it is the
@@ -12,7 +22,9 @@ from scratch and with no solver dependency.
 python tutorial/10_safety_filter.py
 ```
 
-## What it is
+## Part 1 — The predictive safety filter
+
+### What it is
 
 The filter sits between the agent and the actuator and answers one question per
 step:
@@ -35,7 +47,7 @@ Its virtue is what it does *not* do. No reward shaping, no restricted action
 space, no constrained policy class. The learner is untouched in the interior
 and constrained only at the boundary.
 
-## Measured
+### Measured
 
 20 episodes on `lanekeep`:
 
@@ -57,7 +69,7 @@ crash. If yours intervenes constantly on a good policy, it is not a filter, it
 is a controller — and the agent is now learning against it rather than against
 the task.
 
-## With and without, while learning
+### With and without, while learning
 
 ```{image} _static/plots/results_safety.png
 :alt: crashes and return with and without a safety filter
@@ -101,7 +113,7 @@ about the one it proposed (6.2% vs 13.8%) and halves the intervention rate
 (15.8% vs 30.7%). Neither is theoretically correct, but the agent evidently
 learns more from what happened than from what it wanted.
 
-## Three limitations, not caveats
+### Three limitations, not caveats
 
 **It is privileged.** The filter runs on the vehicle state, not on the agent's
 nine beams. That is not cheating — on a real car it sits on the state
@@ -124,7 +136,7 @@ chose (on-policy gradient, misreported dynamics). Neither is correct, the
 literature on learning through a shield does not agree either, and both are
 implemented so the difference can be measured instead of argued.
 
-## Two implementation notes
+### Two implementation notes
 
 **Enumerate, don't solve.** With nine discrete actions the minimisation above
 is not a solver problem — it is enumerate-and-check, ordered by distance from
@@ -140,11 +152,122 @@ competent policy, that is the cost of the filter in practice. The vectorised
 nine-candidate version is kept for the fallback, and a test asserts the two
 certificates agree exactly.
 
-## Not implemented, deliberately
+## Part 2 — Control barrier functions
 
-**Control barrier functions** (Ames et al., [ECC 2019](https://arxiv.org/abs/1903.11199))
-are the pointwise alternative: certify safety through a scalar function of the
-current state, with no prediction. The trade is offline design effort — finding
-a valid CBF — against online compute. On a task where the constraint is a
-bitmap rather than an analytic set, exhibiting a backup trajectory is much
-easier than finding the function.
+`rtrrl_playground/cbf.py` implements the **pointwise** alternative, so the two
+approaches can be compared on the same task, the same action set, the same
+model and the same wrapper.
+
+### What a CBF does instead
+
+Both filters answer "may I apply this action?". They answer it in
+fundamentally different ways.
+
+The predictive filter **exhibits a trajectory**: roll the model forward
+twenty-five steps under a braking backup, check the whole path is legal and
+ends stopped. Safety is certified by *producing the plan that would save you*.
+
+A CBF **evaluates a function**. Define $h(x) > 0$ on the safe set and require
+one algebraic inequality of the action — in discrete time
+(Agrawal & Sreenath, RSS 2017):
+
+$$h(x_{t+1}) \;\ge\; (1-\alpha)\, h(x_t), \qquad 0 < \alpha \le 1$$
+
+Satisfy that every step and $h$ can never cross zero, so the safe set is
+forward invariant. **No horizon, no backup policy: one model step instead of
+twenty-five.**
+
+#### Why it is enumerate-and-check here too
+
+With a continuous input the constraint is linear in the control and the filter
+is the QP $\min \|u - u_L\|^2$ subject to the CBF condition. This repo's
+action space is nine discrete actions, so that QP degenerates into
+enumerate-and-check — exactly as the predictive filter does. The argmin is
+still exact, and **the only thing that differs between the two filters is the
+criterion**, which is what makes the comparison below clean.
+
+### The barrier matters more than the method
+
+The obvious barrier for staying on a track is $h = w - |d|$, with $d$ the
+lateral offset. It is also **myopic**: it permits driving flat out straight at
+a wall until the step before contact, because until then $h$ is still positive
+and still falling slowly. A one-step condition cannot see a braking distance.
+
+The fix is to put the vehicle's dynamics *into the barrier*:
+
+$$h = w - |d| - T_{\text{look}}\,\big|v \sin e_\psi\big|$$
+
+subtracting the lateral ground the car will cover in $T_{\text{look}}$ seconds
+at its current lateral closing rate. The barrier now shrinks when you are
+moving *towards* a wall, not merely when you are near one.
+
+Both are implemented (`h_kind="lateral"` / `"braking"`) and both are measured,
+because *"CBFs are unsafe here"* and *"that barrier was unsafe here"* are very
+different claims and only the second is true.
+
+### Measured, head to head
+
+15 episodes on `lanekeep`. "filter µs" is the filter's own cost, with the
+environment's ~120 µs subtracted. Both filters get the same
+proposed-action-first shortcut, or the comparison would measure an
+implementation asymmetry rather than the criteria.
+
+```{image} _static/plots/results_cbf.png
+:alt: predictive filter versus control barrier function
+:width: 100%
+```
+
+#### Under a random policy — the stress test
+
+| filter | off-track | overridden | filter µs |
+|---|---|---|---|
+| none | **100%** | — | — |
+| CBF, $h = w-|d|$ (naive) | **47%** | 14.5% | 264 |
+| CBF, $h$ with the closing-rate term | **0%** | 13.7% | 280 |
+| predictive, 25-step rollout | **0%** | 10.7% | 565 |
+
+The naive barrier **fails outright**. The corrected one is sound and costs half
+what the rollout costs.
+
+#### Under a competent policy — the deployment case
+
+| filter | off-track | return | overridden | filter µs |
+|---|---|---|---|---|
+| CBF, closing-rate barrier | 0% | 569 | **8.7%** | 279 |
+| predictive, 25-step rollout | 0% | 570 | **0.0%** | 172 |
+
+And here it inverts. The predictive filter is *cheaper* — because when no
+intervention is needed it is a single scalar rollout, and for a competent
+driver it is never needed — and it is **far less conservative**: it overrides
+nothing, while the CBF clips 8.7% of the actions of a driver that was never
+going to crash.
+
+### What the comparison actually says
+
+**Neither method is safer than the other. The barrier design is what carries
+the safety**, and a bad barrier fails visibly (47%) where the same method with
+a good one does not fail at all.
+
+**The pointwise method is more conservative, and structurally so.** A one-step
+condition cannot tell that a *plan* exists — only that the next state is
+acceptable — so it refuses actions a rollout certifies. That is the price of
+not having a horizon.
+
+**Their cost profiles are opposite.** The CBF is ~2× cheaper when it has to
+intervene, and ~1.6× more expensive when it does not, because "nothing needed
+here" is one scalar rollout for the predictive filter and still nine barrier
+evaluations for the CBF. On a vehicle running a policy that is usually right,
+that favours the rollout — which is the opposite of the usual summary that CBFs
+are the cheap option.
+
+**Both inherit the same three limitations**, unchanged, because they follow
+from being a filter and not from the criterion: both are privileged, both are
+only as good as their model of the car (including the grip neither knows), and
+both make the learner's update off-policy.
+
+### Not implemented
+
+The **continuous-input QP** form. With nine discrete actions there is nothing
+for a QP solver to do, and adding one would mean adding a dependency to
+demonstrate an equivalence rather than a difference. `--action-mode continuous`
+exists in the environments, so it is the obvious extension.

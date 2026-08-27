@@ -274,6 +274,18 @@ changes nothing measurable: every comparison against plain `ligru`, on both
 driving tasks and on transfer to a different vehicle, is under half a standard
 error. See {doc}`cells` for the table and for what that probably means.
 
+## Predictive filter vs CBF
+
+```{image} _static/plots/results_cbf.png
+:alt: the two safety filters compared
+:width: 100%
+```
+
+Same task, same nine actions, same model, different criterion. The barrier
+design carries the safety -- a naive positional barrier fails at 47% where the
+same method with a closing-rate term does not fail at all -- and the pointwise
+filter is structurally more conservative. Full discussion in {doc}`safety`.
+
 ## Reproducing
 
 ```bash

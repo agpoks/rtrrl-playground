@@ -166,7 +166,41 @@ def fig_estimators():
     _save(fig, "results_estimators.png")
 
 
+def fig_cbf():
+    """The two filters, on the axes where they actually differ."""
+    d = DATA["cbf_vs_predictive"]
+    rnd = {k: v for k, v in d["random_policy"].items() if not k.startswith("_")}
+    comp = {k: v for k, v in d["competent_policy"].items() if not k.startswith("_")}
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.5, 4.6))
+
+    names = list(rnd)
+    colors = ["0.5", "tab:red", "tab:blue", "tab:green"]
+    ax1.bar(range(len(names)), [rnd[n]["off_track"] for n in names], color=colors)
+    ax1.set_xticks(range(len(names)))
+    ax1.set_xticklabels([n.replace(" (", "\n(") for n in names], fontsize=8)
+    ax1.set_ylabel("episodes ending in a wall")
+    ax1.set_title("Random policy: the barrier carries the safety,\nnot the method")
+    ax1.grid(alpha=0.3, axis="y")
+
+    w = 0.35
+    xs = np.arange(len(comp))
+    ax2.bar(xs - w / 2, [comp[n]["filtered"] * 100 for n in comp], w,
+            label="% of actions overridden", color="tab:orange")
+    ax2.bar(xs + w / 2, [comp[n]["filter_us"] / 10 for n in comp], w,
+            label="filter cost [µs / 10]", color="tab:purple")
+    ax2.set_xticks(xs); ax2.set_xticklabels(list(comp), fontsize=9)
+    ax2.set_title("Competent policy: the pointwise filter is more\n"
+                  "conservative, and here also more expensive")
+    ax2.legend(fontsize=8); ax2.grid(alpha=0.3, axis="y")
+
+    fig.suptitle("Predictive filter vs control barrier function — same task, "
+                 "same actions, same model, different criterion", y=1.02, fontsize=10)
+    fig.tight_layout()
+    _save(fig, "results_cbf.png")
+
+
 def main():
+    fig_cbf()
     fig_cells()
     fig_safety()
     fig_sim_to_real()
