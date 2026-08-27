@@ -1,5 +1,11 @@
 # Measured results
 
+Every number on this page lives in
+[`benchmarks/results/measured.json`](https://github.com/agpoks/rtrrl-playground/blob/main/benchmarks/results/measured.json),
+which the tables *and* the figures both read, so the two cannot drift apart.
+Each block in it records the steps, the seeds and the command that reproduces
+it. Regenerate the figures with `python scripts/make_result_figures.py`.
+
 Everything below is from this repo's own environments on one 16-core laptop
 CPU, with the sweep and suite runners in `benchmarks/`. They are not the
 paper's numbers on the paper's benchmarks; see {doc}`the_algorithm` for the
@@ -11,6 +17,11 @@ policy or collapses onto a bad deterministic one, and the mean of those two
 describes neither. And **the scripted policies are in the tables**, because a
 learned return means nothing without knowing what fifteen lines of hand-written
 control achieve on the same task.
+
+```{image} _static/plots/results_cells.png
+:alt: cell comparison on MemoryChain and lanekeep
+:width: 100%
+```
 
 ## MemoryChain-8 -- the pure memory test
 
@@ -126,6 +137,11 @@ all between 1e-5 and 1e-2 -- so this is not a universal correction, it is a
 statement about a task where the recurrence has little to learn and a biased,
 δ-modulated gradient mostly moves the critic's features around underneath it.
 
+```{image} _static/plots/results_estimators.png
+:alt: gradient estimator alignment and cost
+:width: 100%
+```
+
 ## Gradient estimators
 
 CT-RNN, n=32. Alignment measured in `tutorial/02_gradients_online.py`,
@@ -142,6 +158,11 @@ Averaging a few hundred UORO samples of the *same* gradient takes its alignment
 towards 1; RFLO's 0.72 does not improve with any number of samples. See
 {doc}`estimators`.
 
+```{image} _static/plots/results_safety.png
+:alt: crashes and return, with and without a safety filter
+:width: 100%
+```
+
 ## With a safety filter
 
 RTRRL on `lanekeep`, 200k steps, 4 seeds — see {doc}`safety`.
@@ -156,6 +177,12 @@ RTRRL on `lanekeep`, 200k steps, 4 seeds — see {doc}`safety`.
 
 The worst-case filter crashed zero times in 200k steps of learning and still
 finished with the highest return. The optimistic one is worse than no filter.
+
+```{image} _static/plots/results_sim_to_real.png
+:alt: the sim-to-real gap and how much online adaptation closes
+:width: 85%
+:align: center
+```
 
 ## Sim-to-real
 

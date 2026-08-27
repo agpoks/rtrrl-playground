@@ -1,5 +1,10 @@
 # The recurrent cells
 
+```{image} _static/plots/results_cells.png
+:alt: every cell on a pure memory task and on a driving task
+:width: 100%
+```
+
 Four cells plus a control, chosen so each adds exactly one mechanism to the one
 before. All of them plug into any of the five {doc}`estimators`, because the
 cell decides what the state does and the estimator decides what you are allowed

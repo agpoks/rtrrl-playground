@@ -17,6 +17,11 @@ All five are selected with `--estimator`, share one code path in
 | `rflo` | the same sparsity, decayed by the leak only | $np$ | yes | Murray 2019 |
 | `none` | nothing; the recurrence is a frozen reservoir | 0 | n/a | -- |
 
+```{image} _static/plots/results_estimators.png
+:alt: estimator alignment and cost
+:width: 100%
+```
+
 ## What the difference actually costs
 
 `tutorial/02_gradients_online.py` measures rather than asserts. Cosine

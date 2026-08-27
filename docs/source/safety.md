@@ -59,6 +59,12 @@ the task.
 
 ## With and without, while learning
 
+```{image} _static/plots/results_safety.png
+:alt: crashes and return with and without a safety filter
+:width: 100%
+```
+
+
 RTRRL on `lanekeep`, 200k steps, 4 seeds. "Crashes during training" is the
 fraction of training episodes that ended in a wall — on a real vehicle, the
 number that matters most.
