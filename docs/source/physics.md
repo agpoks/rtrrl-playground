@@ -1,8 +1,50 @@
 # The physical models
 
 Every equation in this repo that describes a moving thing, in one place, with
-its parameters — and an honest statement of where each model stops being a
-vehicle model.
+its parameters, an honest statement of where each model stops being a vehicle
+model — and, at the end, a **measurement of how far apart they actually are**.
+
+```{contents}
+:local:
+:depth: 2
+```
+
+## How the system is modelled
+
+There is no single answer to "how is the system modelled", because four
+different components hold four different beliefs about the same car, and almost
+every measured result in this repo comes from the gaps between them.
+
+```{image} _static/diagrams/system_models.png
+:alt: the plant, and the four different models held of it
+:width: 100%
+```
+
+**The plant** is the only thing that is true. It is a kinematic bicycle with a
+yaw-rate cap, and the grip $\mu$ is redrawn from $U(0.6, 1.4)$ every episode.
+
+**The agent** has no model at all. It sees nine lidar beams and the previous
+action and reward, and everything it knows about the vehicle it has to infer
+from that stream. This is deliberate: the point of a recurrent policy learned
+online is that it does not need the equations.
+
+**The safety filter** has the plant's equations and a *guess* at the grip
+(`assumed_grip`). It reads the true state — it is privileged — so its only
+error is parametric, and the [grip sweep](safety.md#it-does-not-know-the-grip-either)
+measures exactly what that error costs.
+
+**The MPCC** (in [`mpcc-online-tuning`](https://github.com/agpoks/mpcc-online-tuning))
+has a kinematic bicycle with **no yaw-rate cap at all**, so it believes any
+corner is takeable at any speed. That single missing term is what the online
+weight tuning is being asked to absorb.
+
+**`scuderia_gym_jax`** is the rung up: slip angles, Pacejka/brush/Dugoff tyres
+fitted to real recordings. It is a *different plant*, not a different belief
+about this one.
+
+The italic caption on that figure is the sentence to carry away: every
+guarantee anywhere in these docs is a statement about one of the dashed boxes,
+not about the solid one.
 
 ## The ladder
 
@@ -151,6 +193,53 @@ grip and it certifies corners the car cannot take. Measured in {doc}`safety`.
 **The MPCC** in [`mpcc-online-tuning`](https://github.com/agpoks/mpcc-online-tuning)
 does not model the grip limit at all. Compensating for a limit the controller
 does not know about is precisely what the online tuner is asked to do.
+
+## How far apart are they? Measured
+
+`python benchmarks/models.py` — the **same command sequence** (a random walk in
+steering and throttle, so the transients are exercised) driven into each model
+from the same initial state, 10 s at 20 Hz, 8 seeds. The number is the distance
+between that model's position and the repo's kinematic bicycle's.
+
+```{image} _static/diagrams/model_divergence.png
+:alt: open-loop divergence of each model from the repo's kinematic bicycle
+:width: 90%
+```
+
+| model | after 1 s | after 2 s | after 10 s |
+|---|---|---|---|
+| `REAL_VEHICLE` | 0.27 m | 0.55 m | **5.85 m** |
+| `kinematic, grip 1.4` | 0.01 m | 0.47 m | **8.24 m** |
+| `scuderia ks` | 0.18 m | 2.07 m | **11.26 m** |
+| `scuderia std` | 0.84 m | 1.64 m | **12.46 m** |
+| `kinematic, grip 0.6` | 0.05 m | 0.86 m | **13.25 m** |
+| `scuderia st` | 0.16 m | 1.30 m | **13.30 m** |
+
+Three readings, and the first one is the one that matters.
+
+**Changing the unobserved grip parameter is as large an effect as changing the
+model class.** The same equations at $\mu = 0.6$ end up 13.25 m away; a
+completely different model with slip angles and Pacejka tyres (`scuderia st`)
+ends up 13.30 m away. Those are indistinguishable. Everything this repo says
+about `assumed_grip` — the cliff from 0% to 71% crashes, the tube filters, the
+fact that a wrong filter intervenes *less* — rests on that equivalence, and it
+is worth having measured rather than asserted.
+
+**"The same model" is not the same model.** `scuderia ks` is a kinematic
+single-track bicycle, the same *class* as this repo's, and it diverges 11.26 m
+— further than our own model does across its entire grip range at $\mu = 1.4$
+(8.24 m). Different wheelbase, different limits, no yaw-rate cap. A model class
+is not a specification.
+
+**Divergence is slow, then sudden.** Every model is within 0.9 m after one
+second and most are within 2 m after two. A one-second horizon is a regime where
+all of these agree; a ten-second one is a regime where none of them do. That is
+the quantitative version of why a safety filter with a 1.5 s backup horizon can
+be trusted with a model this crude, and why a lap-time prediction cannot.
+
+**`REAL_VEHICLE`** — the nine-parameter perturbation `tutorial/11` uses as its
+"real" car — is the *closest* of all of them at 5.85 m. It is a fair sim-to-real
+exercise and a mild one; the scuderia models are the honest version.
 
 ## What is not modelled here, and where it is
 

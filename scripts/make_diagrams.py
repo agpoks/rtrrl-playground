@@ -29,6 +29,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -182,7 +183,81 @@ def fig_safety():
     print("  wrote safety_pipeline.png")
 
 
-FIGS = {"rtrrl": fig_rtrrl, "safety": fig_safety}
+def fig_system():
+    """Who believes what. The question "how is the system modelled" has four
+    different answers depending on which box you are standing in, and that
+    mismatch is where most of this repo's measured results come from."""
+    fig, ax = _canvas(11.0, 5.2, (-1.8, 15.5), (-5.6, 1.6))
+    box(ax, (6.6, 0.55), 7.4, 1.15, "THE PLANT", PROC,
+        sub="kinematic bicycle + yaw-rate cap, grip redrawn every episode")
+    note(ax, (6.6, 1.45), "the only thing that is actually true")
+
+    box(ax, (0.4, -1.9), 3.0, 1.15, "the agent", LEARNED,
+        sub="no model at all")
+    box(ax, (4.6, -1.9), 3.0, 1.15, "the filter", DATA, dashed=True,
+        sub="same equations, assumed grip")
+    box(ax, (8.8, -1.9), 3.0, 1.15, "the MPCC", DATA, dashed=True,
+        sub="no yaw-rate cap")
+    box(ax, (13.0, -1.9), 3.0, 1.15, "scuderia", DATA, dashed=True,
+        sub="slip angles, Pacejka")
+
+    for x in (0.4, 4.6, 8.8, 13.0):
+        arrow(ax, (6.6, -0.03), (x, -1.33))
+
+    box(ax, (0.4, -4.3), 3.0, 1.05, "9 lidar beams", STATE,
+        sub="+ previous a, r")
+    box(ax, (4.6, -4.3), 3.0, 1.05, "true state", STATE, sub="privileged")
+    box(ax, (8.8, -4.3), 3.0, 1.05, "true state", STATE, sub="privileged")
+    box(ax, (13.0, -4.3), 3.0, 1.05, "the rung up", STATE, sub="a real plant")
+    for x in (0.4, 4.6, 8.8, 13.0):
+        arrow(ax, (x, -2.47), (x, -3.78))
+
+    note(ax, (6.6, -5.25), "every guarantee on this page is a statement about "
+                           "one of the dashed boxes, not about the solid one")
+    fig.tight_layout()
+    OUT.mkdir(parents=True, exist_ok=True)
+    fig.savefig(OUT / "system_models.png", dpi=170, bbox_inches="tight")
+    plt.close(fig)
+    print("  wrote system_models.png")
+
+
+def fig_divergence():
+    """Open-loop divergence, from benchmarks/results/models.json."""
+    import json
+    src = ROOT / "benchmarks" / "results" / "models.json"
+    if not src.exists():
+        print("  skipped divergence: run benchmarks/models.py first")
+        return
+    d = json.loads(src.read_text())
+    fig, ax = plt.subplots(figsize=(7.6, 4.4))
+    styles = {"kinematic, grip 0.6": ("0.15", (0, (5, 2))),
+              "kinematic, grip 1.4": ("0.35", (0, (5, 2))),
+              "REAL_VEHICLE": ("0.5", (0, (1, 1.5))),
+              "scuderia ks": ("0.15", "solid"),
+              "scuderia st": ("0.35", "solid"),
+              "scuderia std": ("0.55", "solid")}
+    t = None
+    for name, r in sorted(d.items(), key=lambda kv: -kv[1]["final"]):
+        c, ls = styles.get(name, ("0.6", "solid"))
+        y = r["curve"]
+        t = np.arange(len(y)) * 0.05
+        ax.plot(t, y, color=c, linestyle=ls, linewidth=1.6, label=name)
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("distance from the repo's kinematic bicycle [m]")
+    ax.set_title("same commands, same start, different model\n"
+                 "dashed: the same equations with different parameters",
+                 fontsize=10)
+    ax.grid(alpha=0.25, linewidth=0.6)
+    ax.legend(fontsize=8, loc="upper left", framealpha=0.9)
+    fig.tight_layout()
+    OUT.mkdir(parents=True, exist_ok=True)
+    fig.savefig(OUT / "model_divergence.png", dpi=170)
+    plt.close(fig)
+    print("  wrote model_divergence.png")
+
+
+FIGS = {"rtrrl": fig_rtrrl, "safety": fig_safety, "system": fig_system,
+        "divergence": fig_divergence}
 
 if __name__ == "__main__":
     for f in FIGS.values():
