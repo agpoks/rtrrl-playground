@@ -8,6 +8,32 @@ available *during* the episode.
 Reference: Julian Lemmel, Radu Grosu, *"Real-Time Recurrent Reinforcement
 Learning"*, AAAI 2025, [arXiv:2311.04830](https://arxiv.org/abs/2311.04830).
 
+```{contents}
+:local:
+:depth: 2
+```
+
+## The whole thing in one figure
+
+```{image} _static/diagrams/rtrrl_architecture.png
+:alt: the RTRRL architecture, showing what is carried forward and what is not
+:width: 100%
+```
+
+Every arrow points forward in time. The only things that cross a timestep
+boundary are the **influence matrix** $\partial h_t/\partial\theta$ and the
+eligibility traces — both fixed-size, both updated in place. There is no
+backward pass, no replay buffer and no batch, which is the entire difference
+between this and every other recurrent actor-critic.
+
+The dashed return path is the meta-RL loop: the previous action and reward are
+fed back as *inputs*, not only used as targets. On `lanekeep` that is worth 24%
+of the return ([Variants](variants.md#meta-rl-inputs)) — the previous reward is
+the only observation the agent ever gets of the grip it is never told.
+
+The figure is also in `docs/tikz/fig_rtrrl.tex` as TikZ, in the greyscale IEEE
+style, for dropping into a paper.
+
 ## 1. A meta-RL recurrent architecture
 
 One recurrent cell whose input at each step is the observation, the **previous

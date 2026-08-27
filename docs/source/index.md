@@ -27,6 +27,7 @@ animations
 real_data
 tutorial
 benchmarks
+variants
 benchmark_results
 to_scuderia_gym_jax
 papers

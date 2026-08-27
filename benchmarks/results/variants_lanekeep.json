@@ -1,0 +1,159 @@
+{
+  "cell": {
+    "ligru": {
+      "mean": 530.0947165662615,
+      "sd": 65.62315081651367,
+      "n": 4,
+      "influence_bytes": 26624
+    },
+    "ctrnn": {
+      "mean": 389.0494827638907,
+      "sd": 35.40948331051993,
+      "n": 4,
+      "influence_bytes": 13568
+    },
+    "ltc": {
+      "mean": 295.07667226320376,
+      "sd": 173.44524841828454,
+      "n": 4,
+      "influence_bytes": 13824
+    },
+    "lrcu": {
+      "mean": 301.2114183912034,
+      "sd": 202.42453908491774,
+      "n": 4,
+      "influence_bytes": 40192
+    },
+    "liquid_gru": {
+      "mean": 399.97741856190174,
+      "sd": 14.922541884977562,
+      "n": 4,
+      "influence_bytes": 26880
+    },
+    "physics_ligru": {
+      "mean": 510.47156816561005,
+      "sd": 52.93828367368295,
+      "n": 4,
+      "influence_bytes": 26624
+    },
+    "mlp": {
+      "mean": 513.4198720188773,
+      "sd": 24.011872331867778,
+      "n": 4,
+      "influence_bytes": 13312
+    }
+  },
+  "estimator": {
+    "rflo": {
+      "mean": 530.0947165662615,
+      "sd": 65.62315081651367,
+      "n": 4,
+      "influence_bytes": 26624
+    },
+    "snap1": {
+      "mean": 416.6502059693328,
+      "sd": 243.5229607391783,
+      "n": 4,
+      "influence_bytes": 26624
+    },
+    "uoro": {
+      "mean": 397.61792754114344,
+      "sd": 220.96887912694243,
+      "n": 4,
+      "influence_bytes": 26880
+    },
+    "rtrl": {
+      "mean": 523.7608662129785,
+      "sd": 31.664118341613143,
+      "n": 4,
+      "influence_bytes": 851968
+    },
+    "hybrid": {
+      "mean": 526.2785692819381,
+      "sd": 62.77545014362552,
+      "n": 4,
+      "influence_bytes": 26624
+    },
+    "none": {
+      "mean": 484.78871657027355,
+      "sd": 62.310669499880184,
+      "n": 4,
+      "influence_bytes": null
+    }
+  },
+  "feedback": {
+    "random": {
+      "mean": 530.0947165662615,
+      "sd": 65.62315081651367,
+      "n": 4,
+      "influence_bytes": 26624
+    },
+    "symmetric": {
+      "mean": 440.1604844617823,
+      "sd": 103.15943003286907,
+      "n": 4,
+      "influence_bytes": 26624
+    }
+  },
+  "critic_update": {
+    "true-online": {
+      "mean": 530.0947165662615,
+      "sd": 65.62315081651367,
+      "n": 4,
+      "influence_bytes": 26624
+    },
+    "paper": {
+      "mean": 507.1155532534085,
+      "sd": 7.509535957871818,
+      "n": 4,
+      "influence_bytes": 26624
+    },
+    "accumulating": {
+      "mean": 509.3311539152704,
+      "sd": 59.8589153594028,
+      "n": 4,
+      "influence_bytes": 26624
+    }
+  },
+  "critic_lr_mode": {
+    "normalized": {
+      "mean": 530.0947165662615,
+      "sd": 65.62315081651367,
+      "n": 4,
+      "influence_bytes": 26624
+    },
+    "fixed": {
+      "mean": 442.9858008526123,
+      "sd": 62.52137090357207,
+      "n": 4,
+      "influence_bytes": 26624
+    }
+  },
+  "meta_inputs": {
+    "True": {
+      "mean": 530.0947165662615,
+      "sd": 65.62315081651367,
+      "n": 4,
+      "influence_bytes": 26624
+    },
+    "False": {
+      "mean": 426.5795599367843,
+      "sd": 50.928506066869495,
+      "n": 4,
+      "influence_bytes": 21504
+    }
+  },
+  "_meta": {
+    "env": "lanekeep",
+    "steps": 150000,
+    "seeds": 4,
+    "defaults": {
+      "cell": "ligru",
+      "estimator": "rflo",
+      "feedback": "random",
+      "critic_update": "true-online",
+      "critic_lr_mode": "normalized",
+      "meta_inputs": true
+    }
+  }
+}

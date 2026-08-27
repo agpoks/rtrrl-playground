@@ -1,0 +1,35 @@
+% The safety filter, and the one question it asks.
+%
+% Drawn as a gate on the action path rather than as a block in series, because
+% the whole claim is that the learner is untouched in the interior and
+% constrained only at the boundary.
+\begin{tikzpicture}
+\input{icra_style}
+
+\node[learned] (pol)  at (0,0)    {policy\\{\footnotesize or MPCC}};
+\node[gate]    (cert) at (4.2,0)  {backup\\exists?};
+\node[proc]    (act)  at (8.4,0)  {actuator};
+\node[proc]    (near) at (4.2,-2.4)
+  {nearest input for which\\one does\\{\footnotesize $\min\|u-u_L\|$}};
+
+\draw[ar] (pol)  -- node[lbl, above]{$u_L$} (cert);
+\draw[ar] (cert) -- node[lbl, above]{yes} node[lbl, below]{unchanged} (act);
+\draw[ar] (cert) -- node[lbl, right]{no} (near);
+\draw[ar] (near.east) -- (8.4,-2.4) -- (act.south);
+
+% the certificate itself
+\node[data] (model) at (0,-2.4) {vehicle model\\{\footnotesize + assumed grip}};
+\node[proc] (roll)  at (0,-4.4)  {roll the backup\\{\footnotesize brake, steer to centreline}};
+\node[state](term)  at (4.2,-4.4) {$x_N \in \mathcal{X}_{\mathrm{safe}}$\\{\footnotesize stopped, on track}};
+\draw[ar] (model) -- (roll);
+\draw[ar] (roll)  -- (term);
+\draw[ar] (term.north) -- (cert.south);
+
+\begin{scope}[on background layer]
+  \node[fit=(model)(roll)(term), draw=black!45, densely dotted,
+        rounded corners=3pt, inner sep=5pt] (certzone) {};
+\end{scope}
+\node[note, below=1pt of certzone]
+  {the guarantee is a statement about the \emph{model}, not the car};
+\node[note, above=1pt of cert] {the learner is untouched in the interior};
+\end{tikzpicture}

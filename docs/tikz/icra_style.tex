@@ -1,0 +1,27 @@
+% Shared TikZ style for the rtrrl-playground figures.
+%
+% Matches the design language of the ICRA template's fig_pipeline: greyscale
+% only (no colour survives a black-and-white print), rounded 2pt corners,
+% solid boxes for things that compute, dashed black!4 for things that are
+% data, black!8 fill for the learned components, Latex arrowheads, and
+% explicit coordinates so the lanes stay where they are put.
+%
+%   \usepackage{tikz}
+%   \usetikzlibrary{arrows.meta, positioning, fit, backgrounds, calc, shapes.geometric}
+%   \input{icra_style}
+%
+\tikzset{
+  font=\small,
+  box/.style={draw, rounded corners=2pt, align=center, inner sep=3.5pt,
+              minimum height=9.5mm},
+  learned/.style={box, fill=black!8, minimum width=24mm},
+  proc/.style={box, fill=white, minimum width=22mm},
+  data/.style={box, fill=black!4, densely dashed, minimum width=22mm},
+  state/.style={box, fill=black!12, minimum width=18mm},
+  gate/.style={draw, diamond, aspect=2.1, inner sep=1pt, align=center,
+               font=\footnotesize, fill=white},
+  ar/.style={-{Latex[length=2.2mm]}, thick},
+  arb/.style={-{Latex[length=2.2mm]}, thick, densely dashed},
+  lbl/.style={font=\footnotesize, inner sep=1.5pt},
+  note/.style={font=\footnotesize\itshape, inner sep=1.5pt},
+}

@@ -1,0 +1,52 @@
+% RTRRL in one figure: what is carried forward, and what is never carried back.
+%
+% The point the layout has to make is that there is no backward pass and no
+% replay buffer -- every arrow points forward in time, and the only thing that
+% crosses a timestep boundary is the influence matrix and the eligibility
+% traces. Laid out with the data path along the top and the learning signals
+% underneath, because that is the distinction a reader is here to see.
+\begin{tikzpicture}
+\input{icra_style}
+
+% ---- the forward path ----------------------------------------------------
+\node[data]    (obs)  at (0,0)     {observation\\{\footnotesize 9 beams}};
+\node[data]    (meta) at (0,-1.5)  {previous\\{\footnotesize action, reward}};
+\node[learned] (cell) at (3.6,-0.7) {recurrent cell\\{\footnotesize CT-RNN / LTC / LiGRU\ldots}};
+\node[state]   (h)    at (7.0,-0.7) {$h_t$};
+\node[learned] (actor)  at (10.4,0.2)  {actor\\{\footnotesize $\pi_\theta(a\mid h)$}};
+\node[learned] (critic) at (10.4,-1.7) {critic\\{\footnotesize $V_w(h)$}};
+\node[proc]    (env)  at (14.0,-0.7) {environment};
+
+\draw[ar] (obs)  -- (cell);
+\draw[ar] (meta) -- (cell);
+\draw[ar] (cell) -- (h);
+\draw[ar] (h) -- (actor);
+\draw[ar] (h) -- (critic);
+\draw[ar] (actor) -- node[lbl, above]{$a_t$} (env);
+
+% the meta-RL loop: the reward is an input, not only a target
+\draw[ar] (env.south) -- (14.0,-3.2) -- node[lbl, above, pos=0.85]{$r_t$, $a_t$}
+          (0,-3.2) -- (meta.south);
+
+% ---- the learning signals ------------------------------------------------
+\node[proc] (td)  at (10.4,-4.6) {TD error $\delta_t$};
+\node[proc] (est) at (5.0,-4.6)
+  {online estimator\\{\footnotesize RFLO / SnAp-1 / UORO / RTRL}};
+\node[state] (P)  at (1.2,-4.6) {influence\\$\partial h_t/\partial\theta$};
+
+\draw[ar] (critic.south) -- (td.north);
+\draw[ar] (td) -- node[lbl, above]{$\delta_t$} (est);
+\draw[ar] (est) -- (P);
+\draw[ar] (P.north) -- node[lbl, right]{carried to $t{+}1$} (cell.south);
+
+% the update is local and immediate
+\draw[arb] (td.east) -- (13.2,-4.6) -- (13.2,-2.6) -- (actor.east);
+
+% ---- what is deliberately absent ----------------------------------------
+\begin{scope}[on background layer]
+  \node[fit=(est)(P), draw=black!45, densely dotted, rounded corners=3pt,
+        inner sep=5pt] (fwd) {};
+\end{scope}
+\node[note, below=1pt of fwd] {carried \emph{forward}: no backward pass, no replay, no batch};
+\node[note, above=1pt of cell] {one update per environment step};
+\end{tikzpicture}

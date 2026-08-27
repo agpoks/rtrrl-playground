@@ -9,6 +9,26 @@ Two answers are implemented here, opposites in method: one certifies safety by
 agent identically, so they can be compared on the same task, the same nine
 actions and the same model.
 
+```{contents}
+:local:
+:depth: 2
+```
+
+## The filter in one figure
+
+```{image} _static/diagrams/safety_pipeline.png
+:alt: the safety filter as a gate on the action path
+:width: 100%
+```
+
+Drawn as a **gate on the action path** rather than a block in series, because
+that is the claim: the learner is untouched in the interior and constrained
+only at the boundary. The dotted region is the certificate — a model, a backup
+manoeuvre, and a terminal set — and the italic note under it is the caveat that
+every measured result on this page comes back to.
+
+TikZ source in `docs/tikz/fig_safety.tex`.
+
 ## Why a filter, and not one of the alternatives
 
 There are four standard ways to stop an RL agent from doing something
