@@ -147,3 +147,45 @@ def test_gaussian_head_gradient():
             dn = logp(mu - e, head.log_sigma) if wrt == "mu" else logp(mu, head.log_sigma - e)
             fd.append((up - dn) / (2 * EPS))
         assert np.abs(analytic - np.array(fd)).max() < 1e-6, wrt
+
+
+def test_liquid_gru_leak_is_bounded_below_one_by_construction():
+    """The reason this cell exists, asserted rather than described.
+
+    RFLO's influence is a geometric series ``P <- leak * P + immediate``, which
+    converges only while ``leak < 1``. A LiGRU whose update gate saturates has
+    ``leak = z = 1`` -- a unit that has learned to remember perfectly, and an
+    influence sum that never decays. ``OnlineCell`` patches that with an
+    arbitrary ``leak_max``; LiquidGRU does not need it, because its leak is
+    ``1/(1 + dt(1/tau + z)) <= 1/(1 + dt/tau) < 1`` for *any* gate value.
+
+    So this test runs with the cap switched off (``leak_max=1.0``) and drives
+    the gates as far open as it can.
+    """
+    n_in, n = 6, 24
+    rng = np.random.default_rng(0)
+    xs = rng.normal(size=(300, n_in)) * 3.0
+
+    def max_leak(cell_name, gate_push):
+        cell = make_cell(cell_name, n_in, n, estimator="rflo", leak_max=1.0,
+                         rng=np.random.default_rng(0))
+        cell.theta[:, :cell.n_xi] += gate_push  # saturate the first gate block
+        cell.reset_state()
+        worst = 0.0
+        for x in xs:
+            xi = np.concatenate([x, cell.h, [1.0]])
+            _h, _imm, leak, _D = cell._forward(xi, False)
+            worst = max(worst, float(leak.max()))
+            cell.step(x)
+        return worst, float(np.abs(cell.P).max())
+
+    ligru_leak, _ = max_leak("ligru", 8.0)
+    lgru_leak, lgru_p = max_leak("liquid_gru", 8.0)
+
+    assert ligru_leak > 0.999, (
+        "a saturated LiGRU gate should reach leak = 1 -- if it does not, this "
+        "test is no longer demonstrating the problem it was written for")
+    tau_max = make_cell("liquid_gru", n_in, n).tau_max
+    bound = 1.0 / (1.0 + 1.0 / tau_max)
+    assert lgru_leak <= bound + 1e-9, f"leak {lgru_leak} exceeded the bound {bound}"
+    assert np.isfinite(lgru_p), "the influence array went non-finite despite the bound"

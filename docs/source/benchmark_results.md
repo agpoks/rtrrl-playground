@@ -38,6 +38,25 @@ This is the cleanest result in the repo and the one worth reading first.
 * **The CT-RNN -- RTRRL's own cell -- struggles**, at `+0.26` with a standard
   deviation of `0.40`, meaning some seeds solve it and some never leave zero.
 
+## The cells, side by side
+
+Same agent, same settings, only the recurrent unit changes. 3 seeds.
+
+| cell | MemoryChain-8 (optimum +1.0) | lanekeep (scripted ≈ 575) |
+|---|---|---|
+| `lrcu` | **+0.889** ± 0.040 | 256 ± 181 |
+| `ligru` | +0.883 ± 0.037 | **468** ± 71 |
+| `liquid_gru` | +0.775 ± 0.090 | 372 ± 99 |
+| `ctrnn` | +0.263 ± 0.399 | 405 ± 117 |
+| `ltc` | +0.011 ± 0.019 | 301 ± 216 |
+| `mlp` (no memory) | −0.005 ± 0.018 | 445 ± 75 |
+
+The ordering **inverts** between the two columns, and that is the most useful
+thing in the table. `lrcu` is best where memory is everything and worst where
+it is not needed; `mlp` is last on the memory task by exactly the margin theory
+predicts (it guesses) and third on the driving task. A cell that wins on one of
+these has not been shown to be a better cell.
+
 ## LaneKeep -- can it drive at all
 
 300k steps, 4 seeds, library defaults. Reference points: a scripted

@@ -10,6 +10,7 @@ cell       what it adds                                           paper
 ``ltc``    the time constant becomes a function of the input      Hasani 2021
 ``lrcu``   the *capacitance* becomes one too                      Farsang 2024
 ``ligru``  gating without continuous time, as the control         Ravanelli 2018
+``liquid_gru`` a GRU gate read as a conductance, plus a leak floor  this repo
 =========  =====================================================  ==================
 
 Any of them composes with any of the five estimators in ``cell.py``
@@ -25,11 +26,13 @@ from rtrrl_playground.nets.cell import ESTIMATORS, OnlineCell
 from rtrrl_playground.nets.ctrnn import CTRNN
 from rtrrl_playground.nets.heads import CategoricalHead, GaussianHead, ValueHead
 from rtrrl_playground.nets.ligru import LiGRU
+from rtrrl_playground.nets.liquid_gru import LiquidGRU
 from rtrrl_playground.nets.lrcu import LRCU
 from rtrrl_playground.nets.ltc import LTC
 from rtrrl_playground.nets.mlp import MLPCell
 
-CELLS = {"ctrnn": CTRNN, "ltc": LTC, "lrcu": LRCU, "ligru": LiGRU, "mlp": MLPCell}
+CELLS = {"ctrnn": CTRNN, "ltc": LTC, "lrcu": LRCU, "ligru": LiGRU,
+         "liquid_gru": LiquidGRU, "mlp": MLPCell}
 
 
 def make_cell(name: str, n_in: int, n_hidden: int, estimator: str = "rflo", **kw):
@@ -40,4 +43,4 @@ def make_cell(name: str, n_in: int, n_hidden: int, estimator: str = "rflo", **kw
 
 
 __all__ = ["OnlineCell", "ESTIMATORS", "CELLS", "make_cell", "CTRNN", "LTC",
-           "LRCU", "LiGRU", "MLPCell", "CategoricalHead", "GaussianHead", "ValueHead"]
+           "LRCU", "LiGRU", "LiquidGRU", "MLPCell", "CategoricalHead", "GaussianHead", "ValueHead"]

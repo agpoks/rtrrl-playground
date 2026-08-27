@@ -11,6 +11,7 @@ to know about how it got there.
 | `ltc` | $h_{t+1} = (h_t + \Delta t\, f A)/(1 + \Delta t(1/\tau + f))$ | $\tau$ becomes a function of the input -- *liquid* | [Hasani et al. 2021](https://arxiv.org/abs/2006.04439) |
 | `lrcu` | $h_{t+1} = (1 - \epsilon\sigma(f))h_t + \epsilon\tanh(u)\,e$ | the *capacitance* becomes one too | [Farsang et al. 2024](https://arxiv.org/abs/2403.08791) |
 | `ligru` | $h_{t+1} = z h_t + (1-z)\tanh(W_c\xi)$ | gating without continuous time, as the control | [Ravanelli et al. 2018](https://arxiv.org/abs/1803.10225) |
+| `liquid_gru` | $h_{t+1} = (h_t + \Delta t\, g\, c)/(1 + \Delta t\, g)$, $g = 1/\tau + z$ | the gate becomes a *conductance* with a floor | this repo |
 | `mlp` | $h_{t+1} = \tanh(W x_t)$ | nothing; no recurrence at all | -- |
 
 **LRCU is here because of the hardware paper.** Lemmel, Resch, Farsang,
@@ -18,6 +19,53 @@ Hasani, Rus & Grosu ([arXiv:2602.02236](https://arxiv.org/abs/2602.02236)) put
 RTRRL on a real 1:10 RoboRacer with an event camera and found the LRC cell the
 one that gets on best with it -- which makes it the most directly relevant
 result in the literature to what this playground is for.
+
+## `liquid_gru`: the repo's own hybrid, and why it exists
+
+Not from a paper. The nearby things — CT-GRU (Mozer et al. 2017), LTC-SE's
+CT-GRU-style gates, and the
+[continuous-time readings of the GRU](https://www.frontiersin.org/journals/computational-neuroscience/articles/10.3389/fncom.2021.678158/full)
+— are all motivated by *supervised* modelling. This one is motivated by the
+learning rule, which is a different argument.
+
+RFLO carries an influence updated as $P \leftarrow \text{leak}\cdot P +
+\text{immediate}$. That is a geometric series and it converges only while
+$\text{leak} < 1$. A LiGRU whose update gate saturates has $\text{leak} = z =
+1$ — a unit that has learned to remember perfectly, which is a reasonable thing
+for a memory task to want, and **an influence sum that never decays**. It
+overflows quietly, tens of thousands of steps into a run. `OnlineCell` patches
+that with `leak_max = 0.99`, an arbitrary numerical cap.
+
+Take the leak structure from LTC and the *target* from a GRU — pull the state
+towards $\tanh(W_c \xi)$ rather than towards a constant, at a rate
+$g = 1/\tau + z$ — and the leak becomes
+
+$$\text{leak} = \frac{1}{1 + \Delta t(1/\tau + z)} \le \frac{1}{1 + \Delta t/\tau} < 1$$
+
+**bounded below 1 by construction, for any gate value.** The arbitrary cap
+becomes a learned per-neuron parameter with a physical meaning. A test asserts
+this with the cap switched off: driven to saturation, LiGRU's leak reaches
+1.0000 and `liquid_gru`'s stops at 0.844.
+
+**The price, measured.** That floor is also a ceiling on memory. On
+MemoryChain-8 (200k steps, 3 seeds, optimum +1.0):
+
+| `tau_init` | leak floor | MemoryChain-8 |
+|---|---|---|
+| (1, 8) | ≤ 0.89 | +0.291 ± 0.404 |
+| (4, 40) | ≤ 0.976 | +0.552 ± 0.393 |
+| **(10, 50)** — the default | ≤ 0.980 | **+0.775 ± 0.090** |
+| LiGRU (no floor) | 1.0 | +0.883 ± 0.037 |
+
+Monotone, and it approaches LiGRU as the floor approaches 1 — exactly what the
+algebra says. On `lanekeep` the same three settings give 351 / 313 / 372, all
+inside the seed spread, so long time constants are free there; hence the
+default.
+
+**It does not win.** LiGRU beats it on both tasks. What it has is a property
+neither LiGRU nor LRCU has — an influence series that provably converges with
+no numerical cap — and a measured price for it. Worth a file, not worth a
+claim.
 
 ## Two things worth knowing before you write your own cell
 
