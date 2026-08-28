@@ -92,11 +92,30 @@ class RTRRL:
                  cell: str = "ctrnn", estimator: str = "rflo", feedback: str = "random",
                  critic_update: str = "true-online", critic_lr_mode: str = "normalized",
                  meta_inputs: bool = True, clip: float = 1.0,
-                 reward_scale: float = 1.0, seed: int = 0, **cell_kwargs):
+                 reward_scale: float = 1.0, spike_threshold: float = 0.0,
+                 seed: int = 0, **cell_kwargs):
         if critic_update not in ("true-online", "paper", "accumulating"):
             raise ValueError("critic_update must be 'true-online', 'paper' or 'accumulating'")
         if critic_lr_mode not in ("normalized", "fixed"):
             raise ValueError("critic_lr_mode must be 'normalized' or 'fixed'")
+        # Event-triggered learning. 0.0 is stock RTRRL: apply the update every
+        # tick. Above zero, |delta| is integrated like the membrane potential of
+        # an integrate-and-fire neuron and the *accumulated* update is applied
+        # only when it crosses the threshold, then the potential resets.
+        #
+        # What this does and does not save: the influence recursion and the
+        # eligibility traces still advance every tick -- they are state, and
+        # skipping them would lose information rather than defer it. What is
+        # deferred is the parameter write, which is where the actor, critic and
+        # cell weight arrays get touched. On hardware that is the part that
+        # competes with the control loop.
+        self.spike_threshold = float(spike_threshold)
+        self._potential = 0.0
+        self._pend_critic = None
+        self._pend_actor = None
+        self._pend_rnn = None
+        self.n_updates = 0
+        self.n_gated_steps = 0
         self.rng = np.random.default_rng(seed)
         self.action_space = action_space
         self.meta_inputs = bool(meta_inputs)
@@ -225,28 +244,58 @@ class RTRRL:
 
         # --- 4. updates ----------------------------------------------------
         if self.critic_update == "accumulating":
-            self.critic.theta += alpha_c * delta * self.e_critic
+            d_critic = alpha_c * delta * self.e_critic
         elif self.critic_update == "paper":
             # Algorithm 1 exactly as printed.
-            self.critic.theta += (delta * self.e_critic
-                                  + alpha_c * (self.v_old - v_now) * phi_t)
+            d_critic = (delta * self.e_critic
+                        + alpha_c * (self.v_old - v_now) * phi_t)
         else:
             # Full true-online TD(lambda), van Seijen et al. (2016) Alg. 1. The
             # difference from "paper" is the (V - V_old) e term, which is what
             # makes the online weights match the offline lambda-return solution.
-            self.critic.theta += ((delta + v_now - self.v_old) * self.e_critic
-                                  - alpha_c * (v_now - self.v_old) * phi_t)
+            d_critic = ((delta + v_now - self.v_old) * self.e_critic
+                        - alpha_c * (v_now - self.v_old) * phi_t)
         self.v_old = v_next
 
         step_a = self.lr_actor * delta
-        if dlog_sigma is None:
-            self.actor.apply(_clip(step_a * self.e_actor, self.clip),
-                             _clip(step_a * self.e_actor_b, self.clip), 1.0)
+        d_a = _clip(step_a * self.e_actor, self.clip)
+        d_b = _clip(step_a * self.e_actor_b, self.clip)
+        d_s = None if dlog_sigma is None else _clip(step_a * dlog_sigma, self.clip)
+        d_rnn = _clip(delta * self.e_rnn, self.clip)
+
+        if self.spike_threshold <= 0.0:
+            self.n_updates += 1
+            self.critic.theta += d_critic
+            if d_s is None:
+                self.actor.apply(d_a, d_b, 1.0)
+            else:
+                self.actor.apply(d_a, d_b, d_s, 1.0)
+            self.cell.apply(d_rnn, self.lr_rnn)
         else:
-            self.actor.apply(_clip(step_a * self.e_actor, self.clip),
-                             _clip(step_a * self.e_actor_b, self.clip),
-                             _clip(step_a * dlog_sigma, self.clip), 1.0)
-        self.cell.apply(_clip(delta * self.e_rnn, self.clip), self.lr_rnn)
+            self.n_gated_steps += 1
+            if self._pend_critic is None:
+                self._pend_critic = np.zeros_like(d_critic)
+                self._pend_actor = [np.zeros_like(d_a), np.zeros_like(d_b),
+                                    None if d_s is None else np.zeros_like(d_s)]
+                self._pend_rnn = np.zeros_like(d_rnn)
+            self._pend_critic += d_critic
+            self._pend_actor[0] += d_a
+            self._pend_actor[1] += d_b
+            if d_s is not None:
+                self._pend_actor[2] += d_s
+            self._pend_rnn += d_rnn
+            self._potential += abs(float(delta))
+            if self._potential >= self.spike_threshold:
+                self.n_updates += 1
+                self._potential = 0.0
+                self.critic.theta += self._pend_critic
+                if self._pend_actor[2] is None:
+                    self.actor.apply(self._pend_actor[0], self._pend_actor[1], 1.0)
+                else:
+                    self.actor.apply(self._pend_actor[0], self._pend_actor[1],
+                                     self._pend_actor[2], 1.0)
+                self.cell.apply(self._pend_rnn, self.lr_rnn)
+                self._pend_critic = None
 
         # --- 5. carry forward ----------------------------------------------
         if not np.isfinite(self.h).all():

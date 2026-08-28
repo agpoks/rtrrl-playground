@@ -325,3 +325,29 @@ def test_hybrid_costs_less_than_exact_rtrl():
                       rng=np.random.default_rng(0))
         sizes[est] = c.influence_bytes()
     assert sizes["rflo"] < sizes["hybrid"] < sizes["rtrl"], sizes
+
+
+def test_spike_gating_defers_updates_without_losing_them():
+    """Event-triggered learning: the update is deferred, not dropped.
+
+    With a threshold the parameter write happens only when integrated |delta|
+    crosses it, but the eligibility traces and the influence recursion still
+    advance every tick -- so what is deferred is the write, not the
+    information. A gated run must therefore touch the weights strictly less
+    often than an ungated one, and still learn.
+    """
+    import numpy as np
+    from rtrrl_playground import make_env
+    from rtrrl_playground.train import train
+    from rtrrl_playground.utils.load import load_algo
+
+    counts = {}
+    for thr in (0.0, 1.0):
+        env = make_env("lanekeep", seed=0)
+        ag = load_algo("rtrrl")(env.obs_dim, env.action_space, cell="ligru",
+                                seed=0, spike_threshold=thr)
+        train(env, ag, 3000, progress=False, seed=0)
+        counts[thr] = ag.n_updates
+        assert np.isfinite(ag.critic.theta).all()
+    assert counts[1.0] < counts[0.0], "gating did not reduce the update count"
+    assert counts[1.0] > 0, "gating suppressed every update"
