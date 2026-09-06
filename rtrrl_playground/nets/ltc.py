@@ -49,8 +49,16 @@ class LTC(OnlineCell):
     name = "ltc"
 
     def _build(self, dt: float = 1.0, tau_init=(1.0, 8.0), tau_min: float = 0.5,
-               tau_max: float = 50.0, a_init: float = 1.0, a_max: float = 2.0) -> None:
+               tau_max: float = 50.0, a_init: float = 1.0, a_max: float = 2.0,
+               unfold: int = 1) -> None:
         self.dt, self.tau_min, self.tau_max, self.a_max = float(dt), tau_min, tau_max, a_max
+        # Algorithm 1 of the paper takes ``L`` fused steps per input step, at a
+        # cost of O(L x T); this takes one by default. The fused solver is
+        # unconditionally stable so L=1 does not diverge --- it is a coarser
+        # integration of the same ODE, and for a controller holding a 50 ms
+        # loop the extra steps are the most expensive thing in the cell. The
+        # parameter exists so that trade can be measured rather than assumed.
+        self.unfold = max(int(unfold), 1)
         # An LTC needs a bigger input gain than a tanh cell to get the same
         # amount of movement out of its state, and the reason is structural
         # rather than a tuning accident. In a CT-RNN the pre-activation *is* the
@@ -101,15 +109,35 @@ class LTC(OnlineCell):
         z = W @ xi
         f = _sigmoid(z)
         df = f * (1.0 - f)
-        den = 1.0 + self.dt * (1.0 / tau + f)
-        h_new = (self.h + self.dt * f * A) / den
+        dt = self.dt / self.unfold
+        inv_tau = 1.0 / tau
+        den = 1.0 + dt * (inv_tau + f)
+        # Algorithm 1's L fused steps, in closed form rather than a loop. The
+        # gate f is computed once from xi and so is constant across the inner
+        # steps, which makes the recursion h <- (h + dt f A)/den a geometric
+        # series with an exact sum:
+        #
+        #     h_L = h_0 g + h_inf (1 - g),  g = den^-L,  h_inf = f A / (1/tau + f)
+        #
+        # Cheaper than iterating, and --- the reason it is written this way ---
+        # differentiable in closed form. A loop gives the forward pass for
+        # free but leaves ``imm`` describing only the last step, which measured
+        # 50--75 % wrong against finite differences at L = 2 and L = 4.
+        g = den ** (-self.unfold)
+        h_inf = f * A / (inv_tau + f)
+        h_new = self.h * g + h_inf * (1.0 - g)
 
-        dz = self.dt * df * (A - h_new) / den  # dh'/dz, the factor everything shares
+        # Exact derivatives of the closed form above, for any L.
+        dg_dz = -self.unfold * g / den * dt * df          # dg/dz
+        dhinf_dz = A * df * inv_tau / (inv_tau + f) ** 2  # dh_inf/dz
+        dz = (self.h - h_inf) * dg_dz + (1.0 - g) * dhinf_dz
+        dg_dtau = self.unfold * g / den * dt * inv_tau ** 2
         imm = np.empty_like(self.theta)
         imm[:, :nx] = dz[:, None] * xi[None, :]
-        imm[:, nx] = self.dt * f / den
-        imm[:, nx + 1] = h_new * self.dt / (tau ** 2 * den)
-        leak = 1.0 / den
+        imm[:, nx] = (1.0 - g) * f / (inv_tau + f)
+        imm[:, nx + 1] = ((self.h - h_inf) * dg_dtau
+                          + (1.0 - g) * f * A * inv_tau ** 2 / (inv_tau + f) ** 2)
+        leak = g
 
         D = None
         if need_D:

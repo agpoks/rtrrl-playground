@@ -28,6 +28,10 @@ running on the car rather than in a training rig.
 - `example.py` — trains it on any of the four environments, with every knob
   the tutorial argues about exposed as a flag.
 - `README.md` — this file.
+- [`RFLO_EXPLAINED.md`](RFLO_EXPLAINED.md) — every equation in `algo.py`
+  (RFLO's influence recursion, the three eligibility traces, feedback
+  alignment, and the event trigger) walked through in plain language, with the
+  LaTeX pseudocode it corresponds to in the paper.
 
 The pieces it composes live in the shared package:
 [`nets/cell.py`](../../rtrrl_playground/nets/cell.py) (the five gradient
