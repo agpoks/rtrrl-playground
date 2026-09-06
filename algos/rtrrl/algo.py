@@ -85,6 +85,39 @@ class RTRRL:
     from a flag.
     """
 
+    def _fires(self) -> bool:
+        """Whether the accumulated update is applied on this step.
+
+        The three rules are matched on rate and differ only in what sets the
+        waiting time: the data, a clock, or a coin.
+        """
+        if self.trigger in ("filter", "filter-or-evidence"):
+            # Read *and clear*: one intervention releases one update, and a
+            # flag left standing would fire on every step after the first.
+            ev, self.filter_event = self.filter_event, False
+            if self.trigger == "filter":
+                return ev
+            return ev or self._potential >= self.spike_threshold
+        if self.trigger in ("barrier", "barrier-or-evidence"):
+            # Same shape as `filter`/`filter-or-evidence`, and set the same
+            # way: something outside the agent that can see privileged state
+            # (here, a stability margin instead of a certified-safe-action
+            # flag) writes `barrier_event` and this reads-and-clears it. An
+            # agent nobody wires a barrier into simply never sees this flag
+            # turn true, so the trigger silently behaves like plain evidence.
+            ev, self.barrier_event = self.barrier_event, False
+            if self.trigger == "barrier":
+                return ev
+            return ev or self._potential >= self.spike_threshold
+        if self.trigger == "periodic":
+            return self._since >= max(self.trigger_period, 1)
+        if self.trigger == "random":
+            # Its own stream. Drawing from self.rng would shift the action
+            # samples too, and the control would differ from the method in two
+            # ways instead of one.
+            return bool(self._trng.random() < self.trigger_prob)
+        return self._potential >= self.spike_threshold
+
     def __init__(self, obs_dim: int, action_space, n_hidden: int = 32,
                  gamma: float = 0.99, lam_actor: float = 0.9, lam_critic: float = 0.9,
                  lam_rnn: float = 0.9, lr_actor: float = 1e-3, lr_critic: float = 0.03,
@@ -93,7 +126,9 @@ class RTRRL:
                  critic_update: str = "true-online", critic_lr_mode: str = "normalized",
                  meta_inputs: bool = True, clip: float = 1.0,
                  reward_scale: float = 1.0, spike_threshold: float = 0.0,
-                 seed: int = 0, **cell_kwargs):
+                 trigger: str = "evidence", trigger_period: int = 0,
+                 trigger_prob: float = 0.0, accumulate: bool = True,
+                 sticky_prob: float = 0.0, seed: int = 0, **cell_kwargs):
         if critic_update not in ("true-online", "paper", "accumulating"):
             raise ValueError("critic_update must be 'true-online', 'paper' or 'accumulating'")
         if critic_lr_mode not in ("normalized", "fixed"):
@@ -109,6 +144,39 @@ class RTRRL:
         # deferred is the parameter write, which is where the actor, critic and
         # cell weight arrays get touched. On hardware that is the part that
         # competes with the control loop.
+        # `trigger` selects *what decides* that the deferred update is applied,
+        # holding everything else -- including the accumulation -- fixed. It
+        # exists so that "waiting for evidence helps" can be separated from
+        # "updating less often helps", which a rate alone cannot distinguish:
+        #
+        #   evidence  integrate |delta| to spike_threshold (the method)
+        #   periodic  fire every `trigger_period` steps    (CV of the gaps = 0)
+        #   random    fire with probability `trigger_prob` (CV of the gaps ~ 1)
+        #
+        # The two controls are matched to the evidence rule's *measured* rate,
+        # so all three write the same number of times and differ only in when.
+        # `accumulate=False` additionally discards the pending update instead of
+        # applying it, which tests the other half of the claim -- that nothing
+        # is lost while waiting, only deferred.
+        valid = ("evidence", "periodic", "random", "filter", "filter-or-evidence",
+                 "barrier", "barrier-or-evidence")
+        if trigger not in valid:
+            raise ValueError(f"trigger must be one of {valid}")
+        self.trigger = trigger
+        self.trigger_period = int(trigger_period)
+        self.trigger_prob = float(trigger_prob)
+        self.accumulate = bool(accumulate)
+        # Set from outside by a safety filter that overrode this step's action.
+        # Its presence is what tells the wrapper the agent wants to be told.
+        self.filter_event = False
+        # Set from outside by a stability margin (e.g. `edrtrl.phase_plane`'s
+        # PhasePlaneBarrier): true when the state is close to losing grip, not
+        # merely when the filter has already had to intervene. The point of
+        # this one is to fire *before* a surprise costs anything, which a TD
+        # error cannot -- it only ever reports what already happened.
+        self.barrier_event = False
+        self._trng = np.random.default_rng(seed + 90_001)
+        self._since = 0
         self.spike_threshold = float(spike_threshold)
         self._potential = 0.0
         self._pend_critic = None
@@ -132,7 +200,8 @@ class RTRRL:
                                    if meta_inputs else None)
         self.cell = make_cell(cell, n_in, n_hidden, estimator=estimator,
                               rng=self.rng, **cell_kwargs)
-        head_kw = dict(feedback=feedback, entropy_coef=entropy_coef, rng=self.rng)
+        head_kw = dict(feedback=feedback, entropy_coef=entropy_coef,
+                      sticky_prob=sticky_prob, rng=self.rng)
         if isinstance(action_space, Discrete):
             self.actor = CategoricalHead(n_hidden, action_space.n, **head_kw)
         elif isinstance(action_space, Box):
@@ -171,6 +240,7 @@ class RTRRL:
         """Begin an episode: clear state and traces, consume ``o_0``, act."""
         self.cell.reset_state()
         self._zero_traces()
+        self.actor.reset()  # a sticky action from the last episode is not one now
         self.h = self.cell.step(self._input(obs, None, 0.0))
         # V_old starts at V(s_0) rather than at 0: the true-online correction
         # term is a *difference* between successive weight vectors evaluated at
@@ -263,7 +333,7 @@ class RTRRL:
         d_s = None if dlog_sigma is None else _clip(step_a * dlog_sigma, self.clip)
         d_rnn = _clip(delta * self.e_rnn, self.clip)
 
-        if self.spike_threshold <= 0.0:
+        if self.trigger == "evidence" and self.spike_threshold <= 0.0:
             self.n_updates += 1
             self.critic.theta += d_critic
             if d_s is None:
@@ -273,6 +343,7 @@ class RTRRL:
             self.cell.apply(d_rnn, self.lr_rnn)
         else:
             self.n_gated_steps += 1
+            self._since += 1
             if self._pend_critic is None:
                 self._pend_critic = np.zeros_like(d_critic)
                 self._pend_actor = [np.zeros_like(d_a), np.zeros_like(d_b),
@@ -285,9 +356,10 @@ class RTRRL:
                 self._pend_actor[2] += d_s
             self._pend_rnn += d_rnn
             self._potential += abs(float(delta))
-            if self._potential >= self.spike_threshold:
+            if self._fires():
                 self.n_updates += 1
                 self._potential = 0.0
+                self._since = 0
                 self.critic.theta += self._pend_critic
                 if self._pend_actor[2] is None:
                     self.actor.apply(self._pend_actor[0], self._pend_actor[1], 1.0)
@@ -295,6 +367,10 @@ class RTRRL:
                     self.actor.apply(self._pend_actor[0], self._pend_actor[1],
                                      self._pend_actor[2], 1.0)
                 self.cell.apply(self._pend_rnn, self.lr_rnn)
+                self._pend_critic = None
+            elif not self.accumulate:
+                # Discard rather than defer: the control for "no gradient
+                # information is lost while waiting".
                 self._pend_critic = None
 
         # --- 5. carry forward ----------------------------------------------
@@ -372,7 +448,23 @@ class RTRRL:
         pi = self.actor.act(self.h, self.rng)[1]
         return int(np.argmax(pi))
 
-    def eval_policy(self):
+    def sample_action(self, obs: np.ndarray, prev_a=None, prev_r: float = 0.0):
+        """One action from the *stochastic* policy, advancing the state.
+
+        The counterpart to :meth:`greedy`, and on a many-action task the only
+        honest one. The argmax of a policy is not the policy: on a nine-action
+        driving task a trained agent's greedy action can be a constant over a
+        whole episode while the distribution it is the mode of drives perfectly
+        well, and behind a safety filter that produces bit-identical scores for
+        differently trained networks -- the filter supplying every action.
+        """
+        self.h = self.cell.step(self._input(obs, prev_a, prev_r))
+        if isinstance(self.actor, GaussianHead):
+            mu = self.actor.theta @ self.h + self.actor.bias
+            return np.clip(mu, self.actor.low, self.actor.high)
+        return int(self.actor.act(self.h, self.rng)[0])
+
+    def eval_policy(self, greedy: bool = True):
         """A greedy policy for :func:`~rtrrl_playground.train.rollout`.
 
         Evaluating a recurrent, meta-RL agent correctly needs two things that
@@ -388,24 +480,26 @@ class RTRRL:
         So this returns a small stateful object with ``reset()`` and
         ``observe(reward)`` hooks, which ``rollout`` calls at the right moments.
         """
-        return _GreedyPolicy(self)
+        return _GreedyPolicy(self, greedy=greedy)
 
 
 class _GreedyPolicy:
     """Stateful greedy wrapper -- see :meth:`RTRRL.eval_policy`."""
 
-    def __init__(self, agent: "RTRRL"):
-        self.agent = agent
+    def __init__(self, agent: "RTRRL", greedy: bool = True):
+        self.agent, self.greedy = agent, bool(greedy)
         self.reset()
 
     def reset(self) -> None:
         self.agent.cell.reset_state()
+        self.agent.actor.reset()
         self.prev_a, self.prev_r = None, 0.0
 
     def observe(self, reward: float) -> None:
         self.prev_r = float(reward)
 
     def __call__(self, obs):
-        a = self.agent.greedy(obs, self.prev_a, self.prev_r)
+        pick = self.agent.greedy if self.greedy else self.agent.sample_action
+        a = pick(obs, self.prev_a, self.prev_r)
         self.prev_a = a
         return a

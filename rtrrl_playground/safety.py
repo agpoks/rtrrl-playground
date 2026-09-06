@@ -390,8 +390,20 @@ class SafeAgent:
 
     def _apply(self, proposed):
         obstacles = self.obstacle_fn() if self.obstacle_fn is not None else None
-        action, _intervened = self.filter(self.state_fn(), proposed, obstacles)
+        action, intervened = self.filter(self.state_fn(), proposed, obstacles)
         self._executed = action
+        # Hand the intervention to the agent, for an agent that wants to learn
+        # *on* it. An override means the policy proposed something that would
+        # have left the tube, which is a signal about the policy available one
+        # step before the failure it would have caused -- and the filter has
+        # already paid for computing it. The flag is read and cleared by the
+        # agent's own trigger; an agent that does not want it never looks.
+        #
+        # The timing is the whole of the correctness here. This runs at the end
+        # of step t, and `agent.step` at t+1 performs the update for exactly
+        # the transition in which the overridden action was executed.
+        if hasattr(self.agent, "filter_event"):
+            self.agent.filter_event = bool(intervened)
         return action
 
     @property

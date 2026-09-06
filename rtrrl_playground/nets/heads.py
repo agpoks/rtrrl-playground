@@ -40,7 +40,8 @@ class CategoricalHead:
     """Softmax policy over ``n_act`` actions, with an entropy bonus."""
 
     def __init__(self, n_hidden: int, n_act: int, feedback: str = "random",
-                 entropy_coef: float = 1e-5, rng: np.random.Generator | None = None):
+                 entropy_coef: float = 1e-5, sticky_prob: float = 0.0,
+                 rng: np.random.Generator | None = None):
         rng = rng or np.random.default_rng(0)
         self.n, self.n_act = int(n_hidden), int(n_act)
         self.theta = np.zeros((self.n_act, self.n))  # start uniform: no early bias
@@ -48,6 +49,19 @@ class CategoricalHead:
         self.B = rng.normal(0, 1.0 / np.sqrt(self.n), (self.n_act, self.n))
         self.feedback = feedback
         self.entropy_coef = float(entropy_coef)
+        # Sticky actions (Machado et al., "Revisiting the ALE", JAIR 2018):
+        # with probability `sticky_prob`, repeat the previous action instead
+        # of the fresh draw below, so consecutive actions are correlated
+        # rather than i.i.d. -- a discrete stand-in for what Ornstein-
+        # Uhlenbeck noise buys a continuous controller. `pi` is always the
+        # *current* policy at `h`, so this changes only which sample of it
+        # gets executed and credited: `grads` scores whatever action was
+        # actually taken under the current `pi`, and the score-function
+        # gradient does not care how that action was chosen. `sticky_prob`
+        # defaults to 0.0, which draws exactly the one `rng` call per tick
+        # this always did -- every existing result is reproduced exactly.
+        self.sticky_prob = float(sticky_prob)
+        self.prev_a: int | None = None
 
     @property
     def n_params(self) -> int:
@@ -56,7 +70,15 @@ class CategoricalHead:
     def act(self, h: np.ndarray, rng: np.random.Generator):
         pi = softmax(self.theta @ h + self.bias)
         a = int(rng.choice(self.n_act, p=pi))
+        if (self.sticky_prob > 0.0 and self.prev_a is not None
+                and rng.random() < self.sticky_prob):
+            a = self.prev_a
+        self.prev_a = a
         return a, pi
+
+    def reset(self) -> None:
+        """Clear the sticky-action memory at an episode boundary."""
+        self.prev_a = None
 
     def grads(self, h: np.ndarray, a: int, pi: np.ndarray):
         """Gradients of ``log pi[a] + eta * H(pi)``.
@@ -99,7 +121,7 @@ class GaussianHead:
 
     def __init__(self, n_hidden: int, n_act: int, feedback: str = "random",
                  entropy_coef: float = 1e-5, log_sigma_init: float = -0.5,
-                 low: float = -1.0, high: float = 1.0,
+                 low: float = -1.0, high: float = 1.0, sticky_prob: float = 0.0,
                  rng: np.random.Generator | None = None):
         rng = rng or np.random.default_rng(0)
         self.n, self.n_act = int(n_hidden), int(n_act)
@@ -110,6 +132,14 @@ class GaussianHead:
         self.feedback = feedback
         self.entropy_coef = float(entropy_coef)
         self.low, self.high = float(low), float(high)
+        # See `CategoricalHead`'s docstring on `sticky_prob`. Here the "action"
+        # the trace was scored on is `raw`, the pre-clip sample, not just an
+        # index into `pi` -- so a sticky tick has to substitute both `a` and
+        # `raw` together, or `grads` would score the discarded fresh draw
+        # instead of the action actually executed.
+        self.sticky_prob = float(sticky_prob)
+        self.prev_a = None
+        self.prev_raw = None
 
     @property
     def n_params(self) -> int:
@@ -118,8 +148,18 @@ class GaussianHead:
     def act(self, h: np.ndarray, rng: np.random.Generator):
         mu = self.theta @ h + self.bias
         sigma = np.exp(self.log_sigma)
-        a = mu + sigma * rng.normal(size=self.n_act)
-        return np.clip(a, self.low, self.high), (mu, sigma, a)
+        raw = mu + sigma * rng.normal(size=self.n_act)
+        a = np.clip(raw, self.low, self.high)
+        if (self.sticky_prob > 0.0 and self.prev_a is not None
+                and rng.random() < self.sticky_prob):
+            a, raw = self.prev_a, self.prev_raw
+        self.prev_a, self.prev_raw = a, raw
+        return a, (mu, sigma, raw)
+
+    def reset(self) -> None:
+        """Clear the sticky-action memory at an episode boundary."""
+        self.prev_a = None
+        self.prev_raw = None
 
     def grads(self, h: np.ndarray, a, cache):
         """Gradients of ``log pi[a] + eta * H``, ``H = sum(log sigma) + const``.
