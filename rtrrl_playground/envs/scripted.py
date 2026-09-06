@@ -25,6 +25,12 @@ import numpy as np
 
 N_BEAMS = 9
 
+#: The default scan these were written against: nine beams over 120 degrees.
+#: ``lanekeep`` now takes ``n_beams``/``fov_deg``, and a controller reading
+#: ``obs[:9]`` of a 61-beam scan is looking only at the left shoulder, so both
+#: policies below take the table they should read.
+BEAM_ANGLES = np.deg2rad(np.linspace(-60.0, 60.0, N_BEAMS))
+
 
 def _act(steer: int, throttle: int) -> int:
     """(steer, throttle) in {-1,0,1}^2 -> the flat 9-way action index."""
@@ -40,15 +46,75 @@ class WallFollower:
     deep.
     """
 
-    def __init__(self, slow_below: float = 0.55, hard_below: float = 0.30):
+    def __init__(self, slow_below: float = 0.55, hard_below: float = 0.30,
+                 beam_angles=None):
         self.slow_below = slow_below
         self.hard_below = hard_below
+        self.beam_angles = np.asarray(BEAM_ANGLES if beam_angles is None
+                                      else beam_angles, dtype=float)
 
     def __call__(self, obs: np.ndarray) -> int:
-        r = obs[:N_BEAMS]
+        r = obs[:len(self.beam_angles)]
         left, right = r[6:].sum(), r[:3].sum()
         steer = 1 if left > right + 0.02 else (-1 if right > left + 0.02 else 0)
         ahead = r[4]
+        throttle = 1 if ahead > self.slow_below else (-1 if ahead < self.hard_below else 0)
+        return _act(steer, throttle)
+
+    def reset(self) -> None:
+        pass
+
+
+class GapFollower:
+    """Follow-the-gap with a disparity extender --- the F1TENTH reactive standard.
+
+    ``WallFollower`` steers toward whichever side has more room. That is a
+    stable rule on an open corner and the wrong one on a tight one: it aims at
+    the *balance* of free space rather than at a direction the car can take, so
+    on a hairpin, where both sides are close, it splits the difference and
+    drives at the apex.
+
+    This aims at the furthest point instead, after closing the gaps a finite
+    beam count opens up. The disparity step is the part that matters: where two
+    adjacent beams differ by more than the car is wide, the far reading belongs
+    to something behind an edge the car cannot fit past, so the near reading is
+    extended across the angular half-width of the car. Without it a
+    gap-follower drives confidently into door frames.
+
+    Two thresholds and no state, like the wall-follower, so a comparison
+    between them is about the rule and not about the tuning.
+    """
+
+    def __init__(self, car_half_width: float = 0.20, slow_below: float = 1.2,
+                 hard_below: float = 0.55, max_range: float = 5.0,
+                 beam_angles=None):
+        self.car_half_width = float(car_half_width)
+        self.slow_below, self.hard_below = float(slow_below), float(hard_below)
+        self.max_range = float(max_range)
+        self.beam_angles = np.asarray(BEAM_ANGLES if beam_angles is None
+                                      else beam_angles, dtype=float)
+
+    def __call__(self, obs: np.ndarray) -> int:
+        ang = self.beam_angles
+        n = len(ang)
+        r = np.asarray(obs[:n], dtype=float) * self.max_range
+        if n < 3:
+            return _act(0, 1)
+        d_ang = float(ang[-1] - ang[0]) / (n - 1)
+        ext = r.copy()
+        for i in range(n - 1):
+            if abs(r[i + 1] - r[i]) < 2 * self.car_half_width:
+                continue
+            near, far = (i, i + 1) if r[i] < r[i + 1] else (i + 1, i)
+            # how many beams the car subtends at the near reading
+            k = int(np.ceil(np.arctan2(self.car_half_width,
+                                       max(r[near], 1e-3)) / max(d_ang, 1e-6)))
+            lo, hi = ((far, min(far + k + 1, n)) if far > near
+                      else (max(far - k, 0), far + 1))
+            ext[lo:hi] = np.minimum(ext[lo:hi], r[near])
+        aim = float(ang[int(np.argmax(ext))])
+        steer = 1 if aim > 0.08 else (-1 if aim < -0.08 else 0)
+        ahead = float(r[np.argmin(np.abs(ang))])
         throttle = 1 if ahead > self.slow_below else (-1 if ahead < self.hard_below else 0)
         return _act(steer, throttle)
 

@@ -282,4 +282,37 @@ class Track:
         return Track(r * np.cos(th), r * np.sin(th), half_width)
 
 
-TRACKS = {"oval": Track.oval, "curvy": Track.curvy}
+    @staticmethod
+    def hairpins(scale: float = 5.0, lobe: float = 0.20, k: int = 5,
+                 half_width: float = 0.75, ds: float = 0.2) -> "Track":
+        """A five-lobed rosette --- corners the car cannot simply follow.
+
+        ``oval`` and ``curvy`` bottom out at 2.50 m and 2.08 m of radius, both
+        comfortably above the 0.78 m a 1:10 car needs to turn, so a policy
+        trained on them has never had to *open a corner out*. Every imported
+        circuit is tighter than that limit: 0.56 m on the competition map,
+        0.67 and 0.71 m on the two ICRA tracks. Measured, a policy that races
+        the synthetic pair at 3.6 m/s fails on the competition circuit within
+        nine metres --- not because it drives badly but because it has never
+        met a corner it cannot follow.
+
+        At the defaults this is a 38 m lap whose tightest corner is 0.86 m:
+        just above the geometric limit, so the centreline is followable in
+        principle, and far enough below the training tracks that the car must
+        brake into the corner and use the width of the corridor.
+
+        Built as a closed polar curve, ``r(theta) = scale (1 + lobe cos k
+        theta)``, for the same reason ``curvy`` is. A first version assembled
+        straights and constant-radius turns whose angles summed to 360 degrees
+        --- which closes the *heading* and says nothing about the *position*.
+        It came out as an open S, and the Track class joined the loose ends
+        with a straight jump across the middle. A parametric closed curve
+        cannot fail that way.
+        """
+        n = max(int(2 * np.pi * scale * 1.6 / ds), 256)
+        th = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        r = scale * (1 + lobe * np.cos(k * th))
+        return Track(r * np.cos(th), r * np.sin(th), half_width)
+
+
+TRACKS = {"oval": Track.oval, "curvy": Track.curvy, "hairpins": Track.hairpins}

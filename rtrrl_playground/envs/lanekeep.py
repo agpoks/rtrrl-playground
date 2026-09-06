@@ -42,6 +42,10 @@ recurrence something real to integrate:
 * the **grip** is redrawn every episode from ``grip_range`` and never
   observed, so the speed a corner can be taken at is a property of *this run*
   that has to be discovered by driving.
+
+Leaving the track and stalling both cost ``-1`` and terminate. Stalling used to
+terminate for free, which made standing still a local optimum on any track hard
+enough that driving risked a crash.
 """
 
 from __future__ import annotations
@@ -76,6 +80,19 @@ A_LAT_MAX = _P.a_lat_max
 # diameter. With five beams the gap at that range was 1.5 m and traffic
 # genuinely disappeared between rays, which is a sensor bug masquerading as a
 # hard exploration problem.
+#: The default scan: 9 beams over 120 degrees. That is a *small fraction* of a
+#: real one --- the Hokuyo on an F1TENTH gives 1080 beams over 270 degrees, and
+#: ``scuderia_gym_jax`` simulates that. Nine over 120 leaves 15 degrees between
+#: neighbours, so at 2.5 m they are 0.65 m apart, wider than the car, and
+#: nothing at all past 60 degrees to the side.
+#:
+#: On a corner tighter than the car's turning circle that is not a detail. The
+#: information that the track *turns here* sits at 70--90 degrees to the side,
+#: where there are no beams, so the car sees only "wall ahead". A reactive
+#: wall-follower survives that --- its rule needs nothing more --- while a
+#: policy trying to carry speed through the corner has nothing to place itself
+#: with. Pass ``n_beams`` and ``fov_deg`` to test whether a failure is the
+#: learner or the sensor.
 BEAM_ANGLES = np.deg2rad(np.linspace(-60.0, 60.0, 9))
 BEAM_RANGE = 5.0
 BEAM_STEP = 0.15
@@ -87,6 +104,7 @@ class LaneKeep(Env):
     def __init__(self, track: str = "oval", action_mode: str = "discrete",
                  observe_speed: bool = False, half_width: float = 0.75,
                  grip_range=(0.6, 1.4), vehicle: VehicleParams | None = None,
+                 n_beams: int | None = None, fov_deg: float | None = None,
                  dt: float = 0.05, max_steps: int = 600,
                  start_jitter: float = 0.3, seed: int | None = None):
         if action_mode not in ("discrete", "continuous"):
@@ -111,7 +129,13 @@ class LaneKeep(Env):
         self.dt = float(dt)
         self.max_steps = int(max_steps)
         self.start_jitter = float(start_jitter)
-        self.n_beams = len(BEAM_ANGLES)
+        # The scan is per-environment so a beam count can be swept; the module
+        # constant stays the default so every existing result is reproduced.
+        half = 60.0 if fov_deg is None else float(fov_deg) / 2.0
+        self.beam_angles = (BEAM_ANGLES if n_beams is None and fov_deg is None
+                            else np.deg2rad(np.linspace(-half, half,
+                                                        int(n_beams or 9))))
+        self.n_beams = len(self.beam_angles)
         self.obs_dim = self.n_beams + int(self.observe_speed)
         # 3 steering choices x 3 throttle choices. A flat 9-way softmax rather
         # than two heads: one categorical distribution is one gradient to derive.
@@ -123,6 +147,9 @@ class LaneKeep(Env):
     def _reset_state(self):
         self.grip = 1.0
         self.x = self.y = self.psi = self.v = self.delta = 0.0
+        # only meaningful under dynamics="dynamic"; zero otherwise so a
+        # consumer reading them on the kinematic car gets a defined value
+        self.vx = self.vy = self.beta = 0.0
         self._k = 0
         self._s = 0.0
         self._t = 0
@@ -139,7 +166,7 @@ class LaneKeep(Env):
 
     def _obs(self, extra_obstacles=None) -> np.ndarray:
         ranges, flags = self.track.beam_ranges(
-            self.x, self.y, self.psi, BEAM_ANGLES,
+            self.x, self.y, self.psi, self.beam_angles,
             max_range=BEAM_RANGE, step=BEAM_STEP, obstacles=extra_obstacles,
         )
         ranges = self._corrupt(ranges)
@@ -175,6 +202,7 @@ class LaneKeep(Env):
         psi0 = self.track.heading[k] + self._rng.uniform(-1, 1) * self.start_jitter
         p = self.track.center[k] + d0 * self.track.normal[k]
         self.x, self.y, self.psi = float(p[0]), float(p[1]), float(psi0)
+        self.vx, self.vy, self.beta, self.yaw_rate = 1.0, 0.0, 0.0, 0.0
         self.v = 1.0
         self.delta = 0.0
         self._k = k
@@ -188,6 +216,105 @@ class LaneKeep(Env):
 
         Called after the ego is placed and before the first observation, so a
         subclass can put its traffic on the track in time to be seen by it."""
+
+    def _fiala(self, alpha, C, mu, Fz):
+        """Lateral tyre force from slip angle --- the Fiala brush model.
+
+        Kept in step with ``edrtrl.phase_plane.fiala`` in the event-driven-rtrl
+        repo, which computes the stable region this car is meant to stay
+        inside. Two implementations of one curve is a real hazard, so that repo
+        carries a test asserting the two agree; if this changes, that test is
+        where it will show up.
+        """
+        a_sl = np.arctan(3.0 * mu * Fz / C)
+        t = np.tan(np.clip(alpha, -np.pi / 2 + 1e-6, np.pi / 2 - 1e-6))
+        lin = (-C * t + C ** 2 / (3.0 * mu * Fz) * abs(t) * t
+               - C ** 3 / (27.0 * mu ** 2 * Fz ** 2) * t ** 3)
+        return lin if abs(alpha) < a_sl else -mu * Fz * np.sign(alpha)
+
+    def _integrate_dynamic(self, steer: float, throttle: float):
+        """One tick of a single-track car with brush tyres.
+
+        The states the kinematic model does not have: body-frame lateral
+        velocity and yaw rate, from which sideslip ``beta`` follows. With these
+        the car can be *in* a slide rather than merely be prevented from
+        turning, so the (beta, r) phase plane exists and its separatrix is a
+        boundary the controller can be asked to respect.
+
+        Friction is mapped so the two models are equally hard rather than
+        merely both plausible: the kinematic car's ceiling is
+        ``a_lat_max * grip``, so ``mu`` is set to make the tyres peak at the
+        same lateral acceleration. Without this the dynamic car would be
+        grippier by a factor of ``g / a_lat_max`` and none of the numbers
+        measured on the kinematic one would transfer.
+
+        Sub-stepped because the lateral mode has a time constant near
+        ``C / (m * U)`` --- about 36 ms at 3 m/s, against a 50 ms tick --- and
+        blended to the kinematic model below ``v_blend`` because that same time
+        constant goes to zero as the car does, and no explicit integrator
+        survives it.
+        """
+        p = self.vehicle
+        b_cg = p.wheelbase - p.a_cg
+        mu = self.grip * p.a_lat_max / 9.81
+        Fzf = p.mass * 9.81 * b_cg / p.wheelbase
+        Fzr = p.mass * 9.81 * p.a_cg / p.wheelbase
+        share_r = (Fzr / (Fzf + Fzr) if p.rear_drive_share is None
+                   else float(p.rear_drive_share))
+        # what the driven axles can actually put down, in m/s^2
+        lim = [mu * Fzr / share_r] if share_r > 1e-9 else []
+        if share_r < 1.0 - 1e-9:
+            lim.append(mu * Fzf / (1.0 - share_r))
+        a_traction = min(lim) / p.mass if lim else 0.0
+        # What the throttle is allowed to ask of the driven tyres. See
+        # VehicleParams.throttle_grip_share: at 1.0 full throttle consumes the
+        # whole axle and the car cannot corner while accelerating.
+        a_cap = a_traction * float(p.throttle_grip_share)
+        h = self.dt / max(p.n_substeps, 1)
+        for _ in range(max(p.n_substeps, 1)):
+            self.delta += (steer * p.steer_max + p.steer_bias - self.delta) * h / p.steer_tau
+            # A tyre cannot push harder than it grips, and the limit belongs
+            # to the *driven* axle rather than to the car. Drag is separated
+            # out because it is aerodynamic and rolling resistance, not a
+            # tyre force, so it neither consumes the friction ellipse nor is
+            # bounded by it.
+            a_tyre = float(np.clip(throttle * p.accel_max * p.throttle_scale,
+                                   -a_cap, a_cap))
+            ax = a_tyre - p.drag * self.vx
+            vx = self.vx
+            # biased, not clamped: see VehicleParams.v_bias
+            vxs = float(np.hypot(vx, p.v_bias))
+            af = np.arctan((self.vy + p.a_cg * self.yaw_rate) / vxs) - self.delta
+            ar = np.arctan((self.vy - b_cg * self.yaw_rate) / vxs)
+            # What each axle spends driving it cannot spend cornering: the
+            # friction ellipse, and the term that gives the phase plane its
+            # saddle points at all.
+            def _derate(Fx, Fz):
+                used = min(abs(Fx) / max(mu * Fz, 1e-9), 1.0)
+                return max(mu * np.sqrt(max(1.0 - used ** 2, 0.0)), 1e-3)
+            Fxr = p.mass * a_tyre * share_r
+            Fxf = p.mass * a_tyre * (1.0 - share_r)
+            Fyf = self._fiala(af, p.c_f, _derate(Fxf, Fzf), Fzf)
+            Fyr = self._fiala(ar, p.c_r, _derate(Fxr, Fzr), Fzr)
+            vy_dyn = self.vy + ((Fyf * np.cos(self.delta) + Fyr) / p.mass
+                                - vx * self.yaw_rate) * h
+            r_dyn = self.yaw_rate + ((p.a_cg * Fyf * np.cos(self.delta)
+                                      - b_cg * Fyr) / p.inertia) * h
+            # the kinematic answer, which is what the blend falls back to
+            r_kin = vx * np.tan(self.delta) / p.wheelbase
+            vy_kin = r_kin * b_cg
+            # tanh, not a clamped ramp: a ramp's derivative jumps at both ends
+            w = float(0.5 * (1.0 + np.tanh((vx - p.v_blend_mid)
+                                           / max(p.v_blend_width, 1e-6))))
+            self.vy = w * vy_dyn + (1.0 - w) * vy_kin
+            self.yaw_rate = w * r_dyn + (1.0 - w) * r_kin
+            self.vx = float(np.clip(self.vx + (ax + self.vy * self.yaw_rate) * h,
+                                    0.0, p.speed_max))
+            self.x += (self.vx * np.cos(self.psi) - self.vy * np.sin(self.psi)) * h
+            self.y += (self.vx * np.sin(self.psi) + self.vy * np.cos(self.psi)) * h
+            self.psi += self.yaw_rate * h
+        self.v = float(np.hypot(self.vx, self.vy))
+        self.beta = float(np.arctan2(self.vy, max(self.vx, 1e-6)))
 
     def _integrate(self, steer: float, throttle: float):
         """One 20 Hz control tick of the kinematic bicycle, with a grip limit.
@@ -207,6 +334,8 @@ class LaneKeep(Env):
         makes "how fast can I take this corner" a real question, and therefore
         makes the throttle half of the action space worth learning.
         """
+        if self.vehicle.dynamics == "dynamic":
+            return self._integrate_dynamic(steer, throttle)
         p = self.vehicle
         # steer_bias is a servo trim that is not quite centred: the commanded
         # zero is not the car's zero. It is the single most common real defect
@@ -245,7 +374,14 @@ class LaneKeep(Env):
         if off_track:
             reward, terminated = -1.0, True
         elif stalled:
-            terminated = True
+            # Penalised exactly as hard as leaving the track. It used to
+            # terminate for free, which made standing still a local optimum
+            # worth about zero on any track where driving risks a crash --
+            # strictly better than trying, and one seed on a narrowed circuit
+            # found it. On a task whose whole objective is to cover ground
+            # quickly, refusing to move is the worst outcome available, not a
+            # neutral one.
+            reward, terminated = -1.0, True
         truncated = bool(self._t >= self.max_steps and not terminated)
         obs = self._obs() if not terminated else np.zeros(self.obs_dim)
         info = {"s": s, "d": d, "v": self.v, "grip": self.grip,

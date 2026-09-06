@@ -46,6 +46,13 @@ from rtrrl_playground.spaces import Box, Discrete, Env
 
 STEER_MAX = 0.4  # rad, the steering-angle setpoint the simulator's PID takes
 SPEED_MAX = 4.0  # m/s
+#: How many of the simulator's beams reach the agent, by default. Nine is what
+#: ``lanekeep`` gives and it is what every earlier result here was measured on
+#: -- but it is a *small fraction* of the real sensor, and measured on a track
+#: whose corners are tighter than the car's turning circle it costs a factor of
+#: four in distance covered: 0.16 laps at 9 beams over 120 degrees against 0.61
+#: at 61 over 270. Raise ``n_beams_out`` for anything that has to place the car
+#: on a line rather than merely avoid a wall.
 N_BEAMS_OUT = 9
 BEAM_RANGE = 10.0
 
@@ -59,6 +66,7 @@ class ScuderiaLaneKeep(Env):
                  map_ext: str = ".png", tire_model: int | None = None,
                  action_mode: str = "discrete",
                  observe_speed: bool = False, num_beams: int = 108,
+                 n_beams_out: int = N_BEAMS_OUT, centreline=None,
                  max_steps: int = 2000, control_repeat: int = 5,
                  start_pose=(0.0, 0.0, 0.0), seed: int = 0, **make_kwargs):
         try:
@@ -93,7 +101,8 @@ class ScuderiaLaneKeep(Env):
         self.dt = float(self.env.timestep) * self.control_repeat
         self.observe_speed = bool(observe_speed)
         self.action_mode = action_mode
-        self.obs_dim = N_BEAMS_OUT + int(observe_speed)
+        self.n_beams_out = int(n_beams_out)
+        self.obs_dim = self.n_beams_out + int(observe_speed)
         self.action_space = Discrete(9) if action_mode == "discrete" else Box(2)
         self.max_steps = int(max_steps)
         self.start_pose = np.asarray(start_pose, dtype=float)
@@ -101,7 +110,19 @@ class ScuderiaLaneKeep(Env):
         # Which raw beams to keep. Evenly spaced across the full field of view,
         # so the nine numbers the agent sees mean the same thing they do in
         # envs/lanekeep.py: right to left, straight ahead in the middle.
-        self._idx = np.linspace(0, num_beams - 1, N_BEAMS_OUT).astype(int)
+        self._idx = np.linspace(0, num_beams - 1, self.n_beams_out).astype(int)
+        # A centreline turns "distance travelled" into "progress along the
+        # track", which is what lanekeep pays and therefore the only reward
+        # under which a number here is comparable with one from there. Without
+        # it the agent is rewarded for a fast lap of any loop inside a wide
+        # corridor. Pass an (N, 2) array of metres.
+        self.centreline = None if centreline is None else np.asarray(
+            centreline, dtype=float)
+        if self.centreline is not None:
+            d = np.diff(np.vstack([self.centreline, self.centreline[:1]]), axis=0)
+            self._cl_s = np.concatenate([[0.0], np.cumsum(np.hypot(d[:, 0], d[:, 1]))])
+            self.lap_length = float(self._cl_s[-1])
+        self._prev_s = None
         # jit the bound method once. Without this every control tick re-enters
         # the tracer and a step costs tens of milliseconds -- the simulator is
         # designed to be jitted around a whole `lax.scan` rollout, and stepping
@@ -144,8 +165,32 @@ class ScuderiaLaneKeep(Env):
         return beams
 
     def _reward(self, x: np.ndarray, x_prev: np.ndarray) -> float:
-        """Distance travelled this step, in units of "a full-speed step"."""
-        return float(np.linalg.norm(x[0, :2] - x_prev[0, :2])) / (SPEED_MAX * self.dt)
+        """Progress along the centreline if there is one, else distance moved.
+
+        Both are in units of "a full-speed step", so the scale matches
+        ``lanekeep``. The distinction is not cosmetic: distance travelled
+        rewards a fast lap of any loop inside a wide corridor, and going
+        backwards earns the same as going forwards. Arc length along the
+        centreline is signed and is what a lap time is made of.
+        """
+        if self.centreline is None:
+            return float(np.linalg.norm(x[0, :2] - x_prev[0, :2])) / (SPEED_MAX * self.dt)
+        s = self._arc(x[0, :2])
+        if self._prev_s is None:
+            self._prev_s = s
+            return 0.0
+        # shortest signed step around the loop, so crossing the start line
+        # does not read as a lap of negative progress
+        d = s - self._prev_s
+        half = self.lap_length / 2.0
+        d = d - self.lap_length if d > half else (d + self.lap_length if d < -half else d)
+        self._prev_s = s
+        return float(d) / (SPEED_MAX * self.dt)
+
+    def _arc(self, xy) -> float:
+        """Arc length of the nearest centreline point, in metres."""
+        k = int(np.argmin(np.sum((self.centreline - xy) ** 2, axis=1)))
+        return float(self._cl_s[k])
 
     # -- Env ---------------------------------------------------------------
     def reset(self, seed: int | None = None) -> np.ndarray:
@@ -156,6 +201,7 @@ class ScuderiaLaneKeep(Env):
         _obs, self._state = self.env.reset(self._split(), poses)
         self._t = 0
         self._v_cmd = 1.0
+        self._prev_s = None
         self.history = []
         self._x, self._scans = self._pull(self._state)
         return self._obs_from(self._x, self._scans)
