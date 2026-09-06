@@ -67,6 +67,7 @@ class ScuderiaLaneKeep(Env):
                  action_mode: str = "discrete",
                  observe_speed: bool = False, num_beams: int = 108,
                  n_beams_out: int = N_BEAMS_OUT, centreline=None,
+                 half_width: float | None = None,
                  max_steps: int = 2000, control_repeat: int = 5,
                  start_pose=(0.0, 0.0, 0.0), seed: int = 0, **make_kwargs):
         try:
@@ -123,6 +124,26 @@ class ScuderiaLaneKeep(Env):
             self._cl_s = np.concatenate([[0.0], np.cumsum(np.hypot(d[:, 0], d[:, 1]))])
             self.lap_length = float(self._cl_s[-1])
         self._prev_s = None
+        # ``half_width`` ends an episode on lateral deviation from the
+        # centreline rather than on hitting something in the map, the way
+        # ``lanekeep`` already does. It defaults to None -- the map-collision
+        # behaviour below is unchanged -- because on a *shipped* map collision
+        # is a fine terminator.
+        #
+        # It is not fine on an imported one, which is the whole reason this
+        # exists. A SLAM occupancy grid marks only the walls the lidar
+        # actually saw: measured, 1.6 % of pixels on master_cup against ~30 %
+        # for a shipped map. A car that leaves the circuit then drives into
+        # open space, never collides, is never terminated and earns nothing --
+        # so the run looks like training and teaches nothing. A logical
+        # boundary is immune to holes, unclosed walls and the edge of the
+        # image, and it is the same quantity a real car's tracking error is
+        # measured against, which is why it also transfers to hardware.
+        if half_width is not None and self.centreline is None:
+            raise ValueError(
+                "half_width terminates on distance from the centreline, so it "
+                "needs one: pass centreline=(N, 2) metres alongside it.")
+        self.half_width = None if half_width is None else float(half_width)
         # jit the bound method once. Without this every control tick re-enters
         # the tracer and a step costs tens of milliseconds -- the simulator is
         # designed to be jitted around a whole `lax.scan` rollout, and stepping
@@ -189,8 +210,20 @@ class ScuderiaLaneKeep(Env):
 
     def _arc(self, xy) -> float:
         """Arc length of the nearest centreline point, in metres."""
-        k = int(np.argmin(np.sum((self.centreline - xy) ** 2, axis=1)))
-        return float(self._cl_s[k])
+        return self._nearest(xy)[0]
+
+    def _nearest(self, xy) -> tuple[float, float]:
+        """``(arc length, lateral distance)`` of the nearest centreline point.
+
+        Distance to the nearest *sample*, not the true distance to the
+        polyline, so it over-reads by up to half the sample spacing on a
+        straight. Centrelines here are resampled to a fixed spacing
+        (``bridges.mapimport._resample``), which bounds that error and keeps
+        this one argmin rather than a projection onto every segment.
+        """
+        d2 = np.sum((self.centreline - xy) ** 2, axis=1)
+        k = int(np.argmin(d2))
+        return float(self._cl_s[k]), float(np.sqrt(d2[k]))
 
     # -- Env ---------------------------------------------------------------
     def reset(self, seed: int | None = None) -> np.ndarray:
@@ -225,11 +258,21 @@ class ScuderiaLaneKeep(Env):
         x = self._x[0]
         self.history.append(dict(x=float(x[0]), y=float(x[1]), psi=float(x[4]),
                                  v=float(x[3]), d=0.0))
-        if crashed:
-            return np.zeros(self.obs_dim), -1.0, True, False, {"crashed": True}
+        # Off the track counts as a crash: same -1.0, same termination. The
+        # info flag distinguishes them so a run can report which boundary it
+        # actually hit -- on an imported map "left the corridor" is the one
+        # that fires, and reading it as a collision would misattribute it.
+        lateral = (self._nearest(x[:2])[1] if self.half_width is not None
+                   else float("nan"))
+        off_track = bool(self.half_width is not None and lateral > self.half_width)
+        if crashed or off_track:
+            return (np.zeros(self.obs_dim), -1.0, True, False,
+                    {"crashed": bool(crashed), "off_track": off_track,
+                     "lateral": lateral})
         truncated = self._t >= self.max_steps
         return (self._obs_from(self._x, self._scans), float(reward), False, truncated,
-                {"crashed": False, "v": float(x[3])})
+                {"crashed": False, "off_track": False, "lateral": lateral,
+                 "v": float(x[3])})
 
     # -- pictures ----------------------------------------------------------
     def render_rollout(self, history=None, path: str = "rollout.png", title: str = ""):

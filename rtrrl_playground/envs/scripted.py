@@ -55,9 +55,17 @@ class WallFollower:
 
     def __call__(self, obs: np.ndarray) -> int:
         r = obs[:len(self.beam_angles)]
-        left, right = r[6:].sum(), r[:3].sum()
+        # Outer third each side, and the centre beam. Written as fractions of
+        # the scan rather than as literal indices: `beam_angles` is a
+        # constructor argument, so this is also called with 31 or 61 beams,
+        # and the old `r[6:]`/`r[:3]`/`r[4]` silently meant "beams 6..60
+        # against beams 0..2, steering on a beam 26 degrees off centre" there.
+        # At the default nine beams this reduces to exactly those indices.
+        n = len(r)
+        k = max(1, n // 3)
+        left, right = r[n - k:].sum(), r[:k].sum()
         steer = 1 if left > right + 0.02 else (-1 if right > left + 0.02 else 0)
-        ahead = r[4]
+        ahead = r[n // 2]
         throttle = 1 if ahead > self.slow_below else (-1 if ahead < self.hard_below else 0)
         return _act(steer, throttle)
 
