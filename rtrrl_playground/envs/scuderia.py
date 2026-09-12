@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from rtrrl_playground.envs.vehicle import VehicleParams
 from rtrrl_playground.spaces import Box, Discrete, Env
 
 STEER_MAX = 0.4  # rad, the steering-angle setpoint the simulator's PID takes
@@ -67,9 +68,11 @@ class ScuderiaLaneKeep(Env):
                  action_mode: str = "discrete",
                  observe_speed: bool = False, num_beams: int = 108,
                  n_beams_out: int = N_BEAMS_OUT, centreline=None,
-                 half_width: float | None = None,
+                 half_width=None, width_scale: float = 1.0,
                  max_steps: int = 2000, control_repeat: int = 5,
-                 start_pose=(0.0, 0.0, 0.0), seed: int = 0, **make_kwargs):
+                 start_pose=(0.0, 0.0, 0.0), grip: float | None = None,
+                 track_half_width: float | None = None,
+                 seed: int = 0, **make_kwargs):
         try:
             import jax
             import jax.numpy as jnp
@@ -139,18 +142,195 @@ class ScuderiaLaneKeep(Env):
         # boundary is immune to holes, unclosed walls and the edge of the
         # image, and it is the same quantity a real car's tracking error is
         # measured against, which is why it also transfers to hardware.
+        # ``half_width`` takes a scalar or one value per centreline point. Per
+        # point is the honest form: a real corridor is not a constant width,
+        # and collapsing it to one number has to pick between two bad options
+        # -- the narrowest, which terminates a car that is comfortably on
+        # track wherever the track is wide, or the median, which lets it leave
+        # the track entirely at the pinch points. Measured on master_cup, the
+        # per-point half-width runs 0.37 m to 0.78 m, and the 5th percentile
+        # (0.54 m) ended a *perfectly tracking* pure-pursuit run in 86 steps.
+        #
+        # ``width_scale`` multiplies whatever was passed. It exists for
+        # training rather than for geometry: starting at 1.3 and annealing to
+        # 1.0 gives a policy room to recover early without ever changing the
+        # track the numbers are reported against. It does not move the walls.
         if half_width is not None and self.centreline is None:
             raise ValueError(
                 "half_width terminates on distance from the centreline, so it "
                 "needs one: pass centreline=(N, 2) metres alongside it.")
-        self.half_width = None if half_width is None else float(half_width)
+        if half_width is None:
+            self.half_width = None
+        else:
+            hw = np.atleast_1d(np.asarray(half_width, dtype=float))
+            if hw.size not in (1, len(self.centreline)):
+                raise ValueError(
+                    f"half_width must be a scalar or one value per centreline "
+                    f"point ({len(self.centreline)}), got {hw.size}")
+            self.half_width = hw * float(width_scale)
+        self.width_scale = float(width_scale)
         # jit the bound method once. Without this every control tick re-enters
         # the tracer and a step costs tens of milliseconds -- the simulator is
         # designed to be jitted around a whole `lax.scan` rollout, and stepping
         # it from Python is exactly the usage that does not get that for free.
         self._step_env = self._jax.jit(self.env.step_env)
         self._state = None
+        self._x = None
         self.history: list[dict] = []
+        self._track = None
+        self.track_half_width = (None if track_half_width is None
+                                 else float(track_half_width))
+        # What a safety filter is told about the car. Most of ``VehicleParams``
+        # already describes this vehicle -- 0.40 rad of lock, 4 m/s -- because
+        # both simulators model the same 1:10 car. Two fields do not, and
+        # neither is cosmetic:
+        #
+        # ``accel_max`` is 4.0 m/s^2 there and **1.0 m/s^2 here**, measured:
+        # full throttle from rest gives 1.13 m/s^2 and full brake from 4 m/s
+        # gives 1.00, because ``_decode`` ramps a speed *setpoint* at
+        # ``throttle * 1.0 * dt`` and the simulator's PID tracks it. A filter
+        # left at 4.0 believes it can shed speed four times faster than the car
+        # can, certifies a backup plan that stops in a quarter of the distance,
+        # and produces exactly the "crashes *through* the filter" that
+        # ``bridges.safety.make_safe_agent`` warns about for optimistic grip.
+        #
+        # ``drag`` is 0.0 for the same reason: the measured deceleration was a
+        # flat 1.00 m/s^2 from 4 m/s down, with no velocity-proportional term
+        # (0.15/s would have added 0.6 m/s^2 at that speed and did not).
+        #
+        # ``wheelbase`` is the simulator's own 0.1705 + 0.1515.
+        self.vehicle = VehicleParams(wheelbase=0.322, accel_max=1.0, drag=0.0)
+        self.grip = self._read_grip() if grip is None else float(grip)
+
+    def _read_grip(self) -> float:
+        """The simulator's own friction coefficient, not a guess at it.
+
+        ``mu`` is packed into the tyre parameter arrays rather than exposed as
+        a field; ``simple[13]`` is the one ``scuderia_gym_jax``'s own
+        ``tests/test_tire_parity.py`` reads, and on the shipped RC-10 config it
+        agrees with ``st[0]``, ``brush[2]`` and ``dugoff[2]`` at 1.1. Reading it
+        matters: a barrier certified at 1.0 against tyres worth 1.1 is
+        conservative by 10 % everywhere, and one certified the other way round
+        is confidently wrong -- see ``bridges.safety.make_safe_agent``'s note on
+        a filter given a grip the road does not have.
+        """
+        try:
+            return float(np.asarray(self.env.params.tire.simple).ravel()[13])
+        except Exception:
+            return 1.0
+
+    # -- the dynamic state, under the names the rest of this project uses --
+    #
+    # The single-track state is ``[x, y, delta, v, psi, yaw_rate, beta]``,
+    # verified against the running simulator rather than read off a docstring.
+    # Sideslip and yaw rate are therefore *already here*; they were simply
+    # never given names, and that alone is what kept
+    # ``bridges.stability.StabilityTrigger`` and
+    # ``bridges.safety.make_safe_agent`` off this environment -- both look for
+    # ``env.beta`` / ``env.yaw_rate`` / ``env.delta`` / ``env.vx`` /
+    # ``env.grip``, find nothing, and either never fire or refuse to attach.
+    #
+    # Nothing is cached: ``_x`` is refreshed by ``step``/``reset``, and these
+    # are read a handful of times per tick against the ~12 ms the simulator
+    # itself costs.
+    _ST = dict(x=0, y=1, delta=2, v=3, psi=4, yaw_rate=5, beta=6)
+
+    def _st(self, name: str) -> float:
+        if self._x is None:
+            raise RuntimeError("reset() this environment before reading its state")
+        return float(self._x[0, self._ST[name]])
+
+    @property
+    def x(self) -> float:
+        return self._st("x")
+
+    @property
+    def y(self) -> float:
+        return self._st("y")
+
+    @property
+    def psi(self) -> float:
+        return self._st("psi")
+
+    @property
+    def delta(self) -> float:
+        """Steering angle, rad -- the servo's position, not the setpoint."""
+        return self._st("delta")
+
+    @property
+    def v(self) -> float:
+        """Velocity *magnitude*, m/s. ``vx`` is its longitudinal component."""
+        return self._st("v")
+
+    @property
+    def vx(self) -> float:
+        # beta is the angle between the velocity vector and the body axis, so
+        # the longitudinal component is v cos(beta). At the sideslips this car
+        # reaches the difference is under a percent -- but the phase-plane
+        # barrier divides by this, and "close enough" is how a barrier ends up
+        # certified against a speed the car is not doing.
+        return self._st("v") * float(np.cos(self._st("beta")))
+
+    @property
+    def yaw_rate(self) -> float:
+        return self._st("yaw_rate")
+
+    @property
+    def beta(self) -> float:
+        """Sideslip angle, rad."""
+        return self._st("beta")
+
+    @property
+    def track(self):
+        """A :class:`~rtrrl_playground.envs.track.Track`, for a safety filter.
+
+        Built once, on demand, from the centreline this adapter was given.
+        ``Track`` carries a *scalar* half-width while this environment may hold
+        one per point, so one number has to stand for the corridor, and the
+        choice is not cosmetic. The filter's feasible set has a hard edge at
+        ``half_width - margin``: certifiability does not degrade across it, it
+        falls off a cliff. Measured on master_cup at 1.5 m/s, over 30 points
+        round the lap, as certifiable actions out of nine:
+
+        ==========  ======  ======  ======  ======
+        filter hw   d=0.3   d=0.4   d=0.5   d=0.6
+        ==========  ======  ======  ======  ======
+        0.369 min      8.9     0.0     0.0     0.0
+        0.537 p5       9.0     9.0     0.1     0.0
+        0.781 median   9.0     9.0     9.0     9.0
+        ==========  ======  ======  ======  ======
+
+        So the narrowest value is the *worst* default, not the safest one. This
+        environment terminates on the per-point width -- a median of 0.78 m --
+        and a filter pinned at the 0.37 m pinch point declares a car
+        unrecoverable while the task is still perfectly happy with it. It then
+        brakes, the backup controller drives, and with ``credit="executed"`` the
+        learner is trained on the backup rather than on its own proposal, which
+        is the bias ``experiments/trigger_arms.py``'s revision (1) exists to
+        record. Over-conservatism here does not buy safety; it buys a filter
+        that is always on.
+
+        The default is therefore the 5th percentile -- the same statistic
+        ``bridges.mapimport.save_centreline`` writes into the file's header as
+        *the* half-width, so the filter's boundary is the number the track is
+        described by. Pass ``track_half_width`` for anything else.
+
+        ``None`` without a centreline, so ``make_safe_agent`` raises its own
+        clear error instead of certifying against a track that is not there.
+        """
+        if self.centreline is None:
+            return None
+        if self._track is None:
+            from rtrrl_playground.envs.track import Track
+            if self.track_half_width is not None:
+                hw = float(self.track_half_width)
+            elif self.half_width is None:
+                hw = 1.1
+            else:
+                hw = float(np.percentile(self.half_width, 5))
+            self._track = Track(self.centreline[:, 0], self.centreline[:, 1],
+                                half_width=hw)
+        return self._track
 
     # -- helpers ----------------------------------------------------------
     def _split(self):
@@ -223,7 +403,12 @@ class ScuderiaLaneKeep(Env):
         """
         d2 = np.sum((self.centreline - xy) ** 2, axis=1)
         k = int(np.argmin(d2))
-        return float(self._cl_s[k]), float(np.sqrt(d2[k]))
+        return float(self._cl_s[k]), float(np.sqrt(d2[k])), k
+
+    def _limit_at(self, k: int) -> float:
+        """The half-width in force at centreline index ``k``."""
+        return float(self.half_width[k % len(self.half_width)]
+                     if self.half_width.size > 1 else self.half_width[0])
 
     # -- Env ---------------------------------------------------------------
     def reset(self, seed: int | None = None) -> np.ndarray:
@@ -262,9 +447,12 @@ class ScuderiaLaneKeep(Env):
         # info flag distinguishes them so a run can report which boundary it
         # actually hit -- on an imported map "left the corridor" is the one
         # that fires, and reading it as a collision would misattribute it.
-        lateral = (self._nearest(x[:2])[1] if self.half_width is not None
-                   else float("nan"))
-        off_track = bool(self.half_width is not None and lateral > self.half_width)
+        if self.half_width is not None:
+            _s, lateral, k = self._nearest(x[:2])
+            limit = self._limit_at(k)
+        else:
+            lateral, limit = float("nan"), float("nan")
+        off_track = bool(self.half_width is not None and lateral > limit)
         if crashed or off_track:
             return (np.zeros(self.obs_dim), -1.0, True, False,
                     {"crashed": bool(crashed), "off_track": off_track,
