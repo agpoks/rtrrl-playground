@@ -180,6 +180,15 @@ class ScuderiaLaneKeep(Env):
         self._track = None
         self.track_half_width = (None if track_half_width is None
                                  else float(track_half_width))
+        #: This environment terminates on the *per-point* lateral limit while a
+        #: safety filter certifies against ``track``'s single scalar, so the two
+        #: boundaries are set independently and the scalar is the tighter one.
+        #: That leaves a band -- 0.49 m to a median 0.78 m on master_cup -- in
+        #: which the episode is still alive and the filter can certify nothing,
+        #: and a stopped car there cannot be recovered by braking it harder.
+        #: ``lanekeep`` cannot reach such a state, which is why the filter's
+        #: recovery is off by default and on here.
+        self.filter_recovers_at_standstill = True
         # What a safety filter is told about the car. Most of ``VehicleParams``
         # already describes this vehicle -- 0.40 rad of lock, 4 m/s -- because
         # both simulators model the same 1:10 car. Two fields do not, and

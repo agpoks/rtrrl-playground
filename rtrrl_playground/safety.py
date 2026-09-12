@@ -135,7 +135,7 @@ class PredictiveSafetyFilter:
                  assumed_vehicle: VehicleParams | None = None,
                  margin: float = 0.05, stop_speed: float = 0.25,
                  obstacle_radius: float = 0.44, credit: str = "executed",
-                 n_actions: int = 9):
+                 recover_at_standstill: bool = False, n_actions: int = 9):
         if credit not in ("executed", "proposed"):
             raise ValueError("credit must be 'executed' or 'proposed'")
         self.track = track
@@ -149,6 +149,7 @@ class PredictiveSafetyFilter:
         self._brake = np.full(n_actions, -1.0)
         self.horizon, self.margin = int(horizon), float(margin)
         self.stop_speed, self.obstacle_radius = float(stop_speed), float(obstacle_radius)
+        self.recover_at_standstill = bool(recover_at_standstill)
         self.credit, self.n_actions = credit, int(n_actions)
         self.assumed_grip = float(assumed_grip)
         # (steer, throttle) for each discrete action, and a distance between
@@ -364,6 +365,38 @@ class PredictiveSafetyFilter:
             _free, d, psi_ref = self._project(one)
             steer = self._backup_action(one, d, psi_ref)
             s = int(np.clip(np.round(steer[0]), -1, 1))
+            # Braking is right while there is speed to shed. At a standstill it
+            # is a *no-op*, and if the state is also uncertifiable the filter
+            # has bricked the car: it brakes a stopped car forever, nothing
+            # becomes admissible because the constraint is violated at the
+            # current state, and the episode never ends because the environment
+            # is still happy with where the car is.
+            #
+            # That needs the filter's boundary to sit strictly inside the
+            # environment's termination boundary. It cannot on `lanekeep`,
+            # where leaving the track ends the episode -- measured there, this
+            # branch fires on 0.85 % of steps and always while moving, so
+            # brake-and-steer recovers. It does wherever the two boundaries are
+            # set independently: on `scuderia`/master_cup the car parked at
+            # d = 0.490 m, exactly `half_width - margin`, and sat there for
+            # 1421 of 1500 steps.
+            #
+            # Below `stop_speed` the only authority left is to creep forward
+            # under the backup steering, which is what actually reduces |d|.
+            # One tick is 0.05 m/s on that car: a recovery crawl, not a
+            # decision to drive.
+            #
+            # Off by default, and the reason is measured rather than cautious.
+            # It looked inert on `lanekeep` -- that branch fires on 0.85 % of
+            # steps there and the car is nearly always moving -- but "nearly"
+            # is the whole problem: seed 0 reaches it once at a standstill, the
+            # recovery takes a different action, and every state after that
+            # differs. Intervention went 22.3 % -> 24.2 % and no-safe-action
+            # 74 -> 43 on that seed, with seeds 1 and 2 untouched. Better
+            # behaviour, but it is still a published number moving, so turning
+            # it on is a decision for whoever owns those numbers.
+            if self.recover_at_standstill and state[3] <= self.stop_speed:
+                return 3 * (s + 1) + 2, True
             return 3 * (s + 1) + 0, True
         order = np.argsort(np.abs(self._grid - self._grid[a]).sum(axis=1), kind="stable")
         for cand in order:
