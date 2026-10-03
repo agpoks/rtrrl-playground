@@ -52,7 +52,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from rtrrl_playground.envs.track import Track, TRACKS
+from rtrrl_playground.envs.track import (HEADING_SCALE, Track, TRACKS,
+                                         lookahead_features)
 from rtrrl_playground.envs.vehicle import VehicleParams
 from rtrrl_playground.spaces import (N_STEER, N_THROTTLE, Box, Discrete,
                                      Env, action_grid)
@@ -108,6 +109,7 @@ class LaneKeep(Env):
                  n_beams: int | None = None, fov_deg: float | None = None,
                  dt: float = 0.05, max_steps: int = 600,
                  n_steer: int = N_STEER, n_throttle: int = N_THROTTLE,
+                 lookahead=None, aim_feature: bool = False,
                  start_jitter: float = 0.3, seed: int | None = None):
         if action_mode not in ("discrete", "continuous"):
             raise ValueError("action_mode must be 'discrete' or 'continuous'")
@@ -138,7 +140,26 @@ class LaneKeep(Env):
                             else np.deg2rad(np.linspace(-half, half,
                                                         int(n_beams or 9))))
         self.n_beams = len(self.beam_angles)
-        self.obs_dim = self.n_beams + int(self.observe_speed)
+        # `lookahead` appends one normalised heading error per distance, which
+        # is the quantity a nine-beam policy structurally cannot see: beams in
+        # a narrow corridor read nearly the same everywhere except against a
+        # wall, so they say where the walls are and never where the line turns
+        # next. Off by default -- every result measured before this was
+        # measured without it, and it is privileged information in simulation
+        # (on the car it is a map plus a pose estimate, which the deployment
+        # stack already produces).
+        self.lookahead = ([float(lookahead)] if np.isscalar(lookahead)
+                          else None if lookahead is None
+                          else [float(v) for v in lookahead])
+        # `aim_feature` is the pose-free sibling of `lookahead`: the same
+        # question ("which way does it open ahead") answered from the scan
+        # instead of from a map and a localised pose. On the car that is the
+        # difference between needing a particle filter at control rate and
+        # needing nothing the policy did not already receive.
+        self.aim_feature = bool(aim_feature)
+        self.obs_dim = (self.n_beams + int(self.observe_speed)
+                        + (0 if self.lookahead is None else len(self.lookahead))
+                        + int(self.aim_feature))
         # A flat softmax over steer x throttle rather than two heads: one
         # categorical distribution is one gradient to derive. The *resolution*
         # is `n_steer` x `n_throttle`, defaulting to the 3 x 3 every result
@@ -181,6 +202,13 @@ class LaneKeep(Env):
         parts = [ranges / BEAM_RANGE]
         if self.observe_speed:
             parts.append(np.array([self.v / self.vehicle.speed_max]))
+        if self.lookahead is not None:
+            parts.append(lookahead_features(self.track.center, self.x, self.y,
+                                            self.psi, self.lookahead))
+        if self.aim_feature:
+            from rtrrl_playground.envs.scripted import free_space_heading
+            aim = free_space_heading(ranges, self.beam_angles)
+            parts.append(np.array([np.clip(aim / HEADING_SCALE, -1.0, 1.0)]))
         self._last_beams = (ranges, flags)
         return np.concatenate(parts)
 

@@ -73,6 +73,46 @@ class WallFollower:
         pass
 
 
+def free_space_heading(ranges: np.ndarray, angles: np.ndarray,
+                       car_half_width: float = 0.20) -> float:
+    """Direction of the furthest free space, in radians, from the scan alone.
+
+    The pose-free half of "where does the track go next". A lookahead heading
+    error answers that from a map and a localised pose; this answers it from
+    the lidar, which matters because the two have very different deployment
+    costs: the map version needs a particle filter running at control rate and
+    degrades in a way the policy has never seen when localisation drifts, while
+    this needs the scan the policy already receives.
+
+    The disparity extension is the part that earns its place. Where two adjacent
+    beams differ by more than the car is wide, the far reading belongs to
+    something behind an edge the car cannot fit through, so the near reading is
+    widened across the angular half-width of the car. Without it the furthest
+    beam regularly points through a doorway the car does not fit in.
+
+    Shared with :class:`GapFollower` rather than copied into it -- the same
+    rule the scripted baseline drives on is the rule the feature reports, so a
+    policy given this feature and the gap-follower are looking at one quantity.
+    """
+    ang = np.asarray(angles, dtype=float)
+    r = np.asarray(ranges, dtype=float)
+    n = len(ang)
+    if n < 3:
+        return 0.0
+    d_ang = float(ang[-1] - ang[0]) / (n - 1)
+    ext = r.copy()
+    for i in range(n - 1):
+        if abs(r[i + 1] - r[i]) < 2 * car_half_width:
+            continue
+        near, far = (i, i + 1) if r[i] < r[i + 1] else (i + 1, i)
+        k = int(np.ceil(np.arctan2(car_half_width, max(r[near], 1e-3))
+                        / max(d_ang, 1e-6)))
+        lo, hi = ((far, min(far + k + 1, n)) if far > near
+                  else (max(far - k, 0), far + 1))
+        ext[lo:hi] = np.minimum(ext[lo:hi], r[near])
+    return float(ang[int(np.argmax(ext))])
+
+
 class GapFollower:
     """Follow-the-gap with a disparity extender --- the F1TENTH reactive standard.
 
@@ -108,19 +148,7 @@ class GapFollower:
         r = np.asarray(obs[:n], dtype=float) * self.max_range
         if n < 3:
             return _act(0, 1)
-        d_ang = float(ang[-1] - ang[0]) / (n - 1)
-        ext = r.copy()
-        for i in range(n - 1):
-            if abs(r[i + 1] - r[i]) < 2 * self.car_half_width:
-                continue
-            near, far = (i, i + 1) if r[i] < r[i + 1] else (i + 1, i)
-            # how many beams the car subtends at the near reading
-            k = int(np.ceil(np.arctan2(self.car_half_width,
-                                       max(r[near], 1e-3)) / max(d_ang, 1e-6)))
-            lo, hi = ((far, min(far + k + 1, n)) if far > near
-                      else (max(far - k, 0), far + 1))
-            ext[lo:hi] = np.minimum(ext[lo:hi], r[near])
-        aim = float(ang[int(np.argmax(ext))])
+        aim = free_space_heading(r, ang, self.car_half_width)
         steer = 1 if aim > 0.08 else (-1 if aim < -0.08 else 0)
         ahead = float(r[np.argmin(np.abs(ang))])
         throttle = 1 if ahead > self.slow_below else (-1 if ahead < self.hard_below else 0)

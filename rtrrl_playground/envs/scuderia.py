@@ -74,6 +74,7 @@ class ScuderiaLaneKeep(Env):
                  start_pose=(0.0, 0.0, 0.0), grip: float | None = None,
                  track_half_width: float | None = None,
                  n_steer: int = N_STEER, n_throttle: int = N_THROTTLE,
+                 lookahead=None, aim_feature: bool = False,
                  seed: int = 0, **make_kwargs):
         try:
             import jax
@@ -108,7 +109,17 @@ class ScuderiaLaneKeep(Env):
         self.observe_speed = bool(observe_speed)
         self.action_mode = action_mode
         self.n_beams_out = int(n_beams_out)
-        self.obs_dim = self.n_beams_out + int(observe_speed)
+        # see `lanekeep`'s note: one normalised heading error per distance,
+        # the quantity beams cannot carry. Needs a centreline, which is the
+        # same thing it needs to pay a progress reward at all.
+        self.lookahead = ([float(lookahead)] if np.isscalar(lookahead)
+                          else None if lookahead is None
+                          else [float(v) for v in lookahead])
+        # the pose-free sibling of `lookahead` -- see lanekeep's note
+        self.aim_feature = bool(aim_feature)
+        self.obs_dim = (self.n_beams_out + int(observe_speed)
+                        + (0 if self.lookahead is None else len(self.lookahead))
+                        + int(self.aim_feature))
         # one definition of what a discrete action means, shared with the
         # filters -- see `spaces.action_grid`
         self.action_grid = action_grid(n_steer, n_throttle)
@@ -162,6 +173,10 @@ class ScuderiaLaneKeep(Env):
         # training rather than for geometry: starting at 1.3 and annealing to
         # 1.0 gives a policy room to recover early without ever changing the
         # track the numbers are reported against. It does not move the walls.
+        if lookahead is not None and self.centreline is None:
+            raise ValueError(
+                "lookahead needs a centreline to look along: pass "
+                "centreline=(N, 2) metres alongside it.")
         if half_width is not None and self.centreline is None:
             raise ValueError(
                 "half_width terminates on distance from the centreline, so it "
@@ -375,10 +390,21 @@ class ScuderiaLaneKeep(Env):
         return np.asarray(state.x), np.asarray(state.scans)
 
     def _obs_from(self, x: np.ndarray, scans: np.ndarray) -> np.ndarray:
-        beams = np.clip(scans[0][self._idx] / BEAM_RANGE, 0.0, 1.0)
+        parts = [np.clip(scans[0][self._idx] / BEAM_RANGE, 0.0, 1.0)]
         if self.observe_speed:
-            return np.concatenate([beams, [x[0, 3] / SPEED_MAX]])
-        return beams
+            parts.append(np.array([x[0, 3] / SPEED_MAX]))
+        if self.aim_feature:
+            from rtrrl_playground.envs.scripted import free_space_heading
+            from rtrrl_playground.envs.track import HEADING_SCALE
+            ang = np.linspace(-np.pi / 2, np.pi / 2, self.n_beams_out)
+            aim = free_space_heading(parts[0] * BEAM_RANGE, ang)
+            parts.append(np.array([np.clip(aim / HEADING_SCALE, -1.0, 1.0)]))
+        if self.lookahead is not None:
+            from rtrrl_playground.envs.track import lookahead_features
+            parts.append(lookahead_features(self.centreline, float(x[0, 0]),
+                                            float(x[0, 1]), float(x[0, 4]),
+                                            self.lookahead))
+        return np.concatenate(parts) if len(parts) > 1 else parts[0]
 
     def _reward(self, x: np.ndarray, x_prev: np.ndarray) -> float:
         """Progress along the centreline if there is one, else distance moved.

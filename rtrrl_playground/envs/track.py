@@ -316,3 +316,60 @@ class Track:
 
 
 TRACKS = {"oval": Track.oval, "curvy": Track.curvy, "hairpins": Track.hairpins}
+
+
+#: Heading errors are normalised by this before reaching the network, so the
+#: feature sits on the same scale as the beams (which are in [0, 1]) rather
+#: than being a quantity in radians the first layer has to learn to rescale.
+#: A quarter-turn saturates it; on a drivable line the value rarely leaves
+#: +/-0.4.
+HEADING_SCALE = np.pi / 2
+
+
+def lookahead_heading_error(centre: np.ndarray, x: float, y: float, psi: float,
+                            lookahead: float) -> float:
+    """Heading error, in radians, to the point ``lookahead`` m along the line.
+
+    This is the first half of pure pursuit, and deliberately so. Pure pursuit
+    laps circuits that a nine-beam policy cannot, and the measured difference
+    is not resolution or action set -- quantising pure pursuit's own steering
+    onto three levels still laps master_cup -- but that pure pursuit is *told*
+    where the track goes. Nine beams in a corridor around a metre wide read
+    almost the same everywhere except hard against a wall, so the quantity a
+    policy is missing is not a finer picture of the walls, it is where the line
+    turns next.
+
+    Giving the agent this is privileged information in simulation and ordinary
+    instrumentation on the car: a map plus a pose estimate is what the
+    deployment stack already produces. It is off by default regardless, because
+    every result measured before it was measured without it.
+
+    Walks forward along the centreline from the nearest point until far enough
+    away, so the target is ahead *on the track* rather than merely nearby in
+    space -- the distinction that matters on a hairpin, where the geometrically
+    closest point can be on the way back.
+    """
+    c = np.asarray(centre, dtype=float)
+    xy = np.array([x, y], dtype=float)
+    k = int(np.argmin(np.sum((c - xy) ** 2, axis=1)))
+    n = len(c)
+    j = k
+    for _ in range(n):
+        j = (j + 1) % n
+        if float(np.hypot(*(c[j] - xy))) >= lookahead:
+            break
+    dx, dy = c[j] - xy
+    a = float(np.arctan2(dy, dx) - psi)
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+
+def lookahead_features(centre, x, y, psi, lookaheads) -> np.ndarray:
+    """One normalised heading error per lookahead distance.
+
+    More than one distance is what turns a heading error into a *curvature*
+    cue: the difference between the near and far error says which way the road
+    bends beyond the next correction, which a single lookahead cannot express.
+    """
+    return np.array([np.clip(lookahead_heading_error(centre, x, y, psi, L)
+                             / HEADING_SCALE, -1.0, 1.0)
+                     for L in lookaheads], dtype=float)

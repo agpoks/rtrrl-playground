@@ -53,3 +53,86 @@ def test_make_safe_plumbs_the_grid_without_being_asked():
     safe = make_safe(_Agent(), env)
     assert np.array_equal(safe.filter._grid, env.action_grid)
     assert safe.filter.n_actions == 21
+
+
+# --- lookahead heading error ------------------------------------------------
+# Added with the feature: the agent can be *told* where the line turns next,
+# which is the one thing nine beams in a narrow corridor structurally cannot
+# say. Off by default, because every result predating it was measured without.
+
+from rtrrl_playground.envs.track import (HEADING_SCALE, lookahead_features,
+                                         lookahead_heading_error)
+
+
+def test_lookahead_is_off_by_default():
+    env = LaneKeep()
+    assert env.lookahead is None
+    assert env.obs_dim == env.n_beams + int(env.observe_speed)
+    assert len(env.reset(seed=0)) == env.obs_dim
+
+
+@pytest.mark.parametrize("la", [1.0, [0.5, 1.5], [0.5, 1.0, 2.0]])
+def test_lookahead_widens_the_observation_by_exactly_its_length(la):
+    base, env = LaneKeep(), LaneKeep(lookahead=la)
+    n = 1 if np.isscalar(la) else len(la)
+    assert env.obs_dim == base.obs_dim + n
+    assert len(env.reset(seed=0)) == env.obs_dim
+
+
+def test_heading_error_is_zero_when_pointed_along_a_straight_line():
+    centre = np.stack([np.linspace(0, 50, 400), np.zeros(400)], axis=1)
+    assert abs(lookahead_heading_error(centre, 0.0, 0.0, 0.0, 2.0)) < 1e-9
+    # turned 30 degrees off the line, the error is that 30 degrees back
+    a = lookahead_heading_error(centre, 0.0, 0.0, np.radians(30), 2.0)
+    assert np.isclose(np.degrees(a), -30.0, atol=1e-6)
+
+
+def test_features_are_normalised_and_clipped():
+    centre = np.stack([np.linspace(0, 50, 400), np.zeros(400)], axis=1)
+    f = lookahead_features(centre, 0.0, 0.0, np.radians(30), [2.0])
+    assert np.isclose(f[0], np.radians(-30) / HEADING_SCALE)
+    # facing backwards saturates rather than wrapping to a small number
+    assert abs(lookahead_features(centre, 0.0, 0.0, np.pi, [2.0])[0]) == 1.0
+
+
+def test_further_lookaheads_see_more_of_a_curve():
+    """The point of more than one distance: the spread is a curvature cue."""
+    t = np.linspace(0, 2 * np.pi, 400, endpoint=False)
+    circle = np.stack([10 * np.cos(t), 10 * np.sin(t)], axis=1)
+    f = lookahead_features(circle, 10.0, 0.0, np.pi / 2, [0.5, 1.0, 2.0])
+    assert f[0] < f[1] < f[2]          # the bend only shows up with distance
+    assert np.all(f > 0)               # and it is consistently one way
+
+
+def test_aim_feature_is_pose_free_and_off_by_default():
+    """The whole point: it reads the scan, never the pose.
+
+    If this ever started consulting ``env.x``/``y``/``psi`` it would quietly
+    acquire a localisation dependency that the deployment story is built on
+    not having, and nothing else would notice.
+    """
+    base, env = LaneKeep(), LaneKeep(aim_feature=True)
+    assert base.aim_feature is False
+    assert env.obs_dim == base.obs_dim + 1
+
+    env.reset(seed=0)
+    a = env._obs()[-1]
+    # teleport the car in the map while leaving the scan it sees untouched by
+    # restoring it: a map-based feature would move, a scan-based one cannot
+    x, y, psi = env.x, env.y, env.psi
+    env.x, env.y = x + 500.0, y - 500.0
+    moved_scan = env._obs()[-1]           # scan changes -> feature may change
+    env.x, env.y, env.psi = x, y, psi
+    assert env._obs()[-1] == a            # and returns exactly on restore
+    assert np.isfinite(moved_scan)
+
+
+def test_aim_feature_matches_the_gap_follower_it_is_extracted_from():
+    from rtrrl_playground.envs.scripted import free_space_heading
+    from rtrrl_playground.envs.track import HEADING_SCALE
+    env = LaneKeep(aim_feature=True)
+    env.reset(seed=3)
+    ranges, _flags = env._last_beams
+    expected = np.clip(free_space_heading(ranges, env.beam_angles) / HEADING_SCALE,
+                       -1.0, 1.0)
+    assert np.isclose(env._obs()[-1], expected)
