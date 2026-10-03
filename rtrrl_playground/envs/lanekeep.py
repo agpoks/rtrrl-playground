@@ -54,7 +54,8 @@ import numpy as np
 
 from rtrrl_playground.envs.track import Track, TRACKS
 from rtrrl_playground.envs.vehicle import VehicleParams
-from rtrrl_playground.spaces import Box, Discrete, Env
+from rtrrl_playground.spaces import (N_STEER, N_THROTTLE, Box, Discrete,
+                                     Env, action_grid)
 
 # --- 1:10 RC scale, roughly a Traxxas Slash on a club track -----------------
 # These are the defaults of VehicleParams, re-exported as plain floats because
@@ -106,6 +107,7 @@ class LaneKeep(Env):
                  grip_range=(0.6, 1.4), vehicle: VehicleParams | None = None,
                  n_beams: int | None = None, fov_deg: float | None = None,
                  dt: float = 0.05, max_steps: int = 600,
+                 n_steer: int = N_STEER, n_throttle: int = N_THROTTLE,
                  start_jitter: float = 0.3, seed: int | None = None):
         if action_mode not in ("discrete", "continuous"):
             raise ValueError("action_mode must be 'discrete' or 'continuous'")
@@ -137,9 +139,15 @@ class LaneKeep(Env):
                                                         int(n_beams or 9))))
         self.n_beams = len(self.beam_angles)
         self.obs_dim = self.n_beams + int(self.observe_speed)
-        # 3 steering choices x 3 throttle choices. A flat 9-way softmax rather
-        # than two heads: one categorical distribution is one gradient to derive.
-        self.action_space = Discrete(9) if action_mode == "discrete" else Box(2)
+        # A flat softmax over steer x throttle rather than two heads: one
+        # categorical distribution is one gradient to derive. The *resolution*
+        # is `n_steer` x `n_throttle`, defaulting to the 3 x 3 every result
+        # here was measured at -- see `spaces.action_grid` for why three is not
+        # free, and for why this grid is defined in exactly one place now.
+        self.action_grid = action_grid(n_steer, n_throttle)
+        self.n_steer, self.n_throttle = int(n_steer), int(n_throttle)
+        self.action_space = (Discrete(len(self.action_grid))
+                             if action_mode == "discrete" else Box(2))
         self._rng = np.random.default_rng(seed)
         self._reset_state()
 
@@ -159,8 +167,8 @@ class LaneKeep(Env):
     def _decode(self, action) -> tuple[float, float]:
         """Action -> (steer, throttle), both in [-1, 1]."""
         if self.action_mode == "discrete":
-            a = int(action)
-            return float(a // 3 - 1), float(a % 3 - 1)
+            st, th = self.action_grid[int(action)]
+            return float(st), float(th)
         a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
         return float(a[0]), float(a[1])
 

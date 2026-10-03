@@ -92,7 +92,8 @@ class DiscreteCBFFilter:
                  h_kind: str = "braking", lookahead: float = 0.45,
                  assumed_grip: float = 1.0, assumed_vehicle: VehicleParams | None = None,
                  margin: float = 0.05, obstacle_radius: float = 0.44,
-                 credit: str = "executed", n_actions: int = 9):
+                 credit: str = "executed", n_actions: int = 9,
+                 action_grid=None):
         if h_kind not in H_KINDS:
             raise ValueError(f"h_kind must be one of {H_KINDS}")
         if credit not in ("executed", "proposed"):
@@ -108,9 +109,18 @@ class DiscreteCBFFilter:
         self.model = BicycleModel(dt=float(dt), grip=assumed_grip,
                                   params=self.assumed_vehicle)
         self.margin, self.obstacle_radius = float(margin), float(obstacle_radius)
-        self.credit, self.n_actions = credit, int(n_actions)
-        self._grid = np.array([[a // 3 - 1, a % 3 - 1] for a in range(self.n_actions)],
-                              dtype=np.float64)
+        self.credit = credit
+        # What each discrete action *means*. Taken from the environment when
+        # it offers one (`make_safe` passes `env.action_grid`), because this
+        # used to be an independent copy of the environment's own formula: at
+        # any resolution other than 3 x 3 the two silently disagreed, and a
+        # filter that certifies one action while the environment executes
+        # another is worse than no filter. Falling back to the shared default
+        # keeps every call that predates `action_grid` byte-identical.
+        from rtrrl_playground.spaces import action_grid as _default_grid
+        self._grid = (np.asarray(action_grid, dtype=np.float64)
+                      if action_grid is not None else _default_grid())
+        self.n_actions = len(self._grid)
         self.reset_stats()
 
     def reset_stats(self) -> None:
@@ -225,6 +235,8 @@ def make_safe_cbf(agent, env, credit: str = "executed", assume_env_vehicle: bool
 
     if assume_env_vehicle:
         filter_kwargs.setdefault("assumed_vehicle", getattr(env, "vehicle", None))
+    # see `safety.make_safe`: the environment owns the action meaning
+    filter_kwargs.setdefault("action_grid", getattr(env, "action_grid", None))
     filt = DiscreteCBFFilter(env.track, dt=env.dt, credit=credit, **filter_kwargs)
 
     def state_fn():

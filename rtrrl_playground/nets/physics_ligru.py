@@ -138,13 +138,28 @@ class PhysicsLiGRU(OnlineCell):
             if n_obs + n_act <= self.n_in:
                 self.n_phys = self.N_PHYS
                 self._act_slice = slice(int(n_obs), int(n_obs) + int(n_act))
-                # The discrete action index encodes (steer, throttle) as
-                # (a // 3 - 1, a % 3 - 1); against a one-hot that is a fixed
-                # linear map, so the physics units need no learned input weights
-                # at all -- they read the command exactly.
-                k = np.arange(int(n_act))
-                self._steer_w = (k // 3 - 1).astype(np.float64)
-                self._thr_w = (k % 3 - 1).astype(np.float64)
+                # The discrete action index encodes (steer, throttle); against
+                # a one-hot that is a fixed linear map, so the physics units
+                # need no learned input weights at all -- they read the command
+                # exactly. Taken from `spaces.action_grid` rather than
+                # recomputed, because this was a fifth independent copy of that
+                # formula and the only one that would have gone on silently
+                # producing *plausible* weights at a different resolution.
+                from rtrrl_playground.spaces import action_grid
+                g = action_grid()
+                if len(g) != int(n_act):
+                    # This net reads the command straight off the one-hot, so
+                    # it needs the *environment's* grid. It only ever ran at the
+                    # default resolution; rather than guess a factorisation,
+                    # say so. Silently producing plausible-but-wrong steering
+                    # weights is the failure this refactor exists to remove.
+                    raise ValueError(
+                        f"PhysicsLiGRU's physics units assume the default "
+                        f"{len(g)}-action grid, got n_act={n_act}. Pass the "
+                        f"environment's action_grid through before using a "
+                        f"different steering resolution with this cell.")
+                self._steer_w = g[:, 0].copy()
+                self._thr_w = g[:, 1].copy()
 
         if self.n_phys:
             p = vehicle or VehicleParams()

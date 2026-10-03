@@ -90,3 +90,46 @@ class Env:
     def render_rollout(self, history, path):  # pragma: no cover - optional
         """Optional: save a picture of one episode. Envs that can, override this."""
         return None
+
+
+#: Default steering and throttle resolution. Three of each is what every
+#: result in this repo before the action-resolution sweep was measured at, so
+#: it stays the default -- but it was never a *choice*. The only rationale ever
+#: written down (``envs/lanekeep.py``) argues for a flat categorical over two
+#: heads, which is an argument about the gradient and holds equally at any
+#: resolution; nothing anywhere justified three levels.
+#:
+#: Three is not free. With steering restricted to {-1, 0, +1} x 22.9 deg there
+#: is no intermediate angle in the action set at all, so holding a gentle curve
+#: requires dithering between the lock stops: measured on a trained policy, the
+#: steering sign reverses every 3 steps (0.15 s) and the car oscillates +/-0.5 m
+#: about the centreline. That weave is 67 % of ``curvy``'s half-width and 93 %
+#: of master_cup's -- which is why the same policy laps one and cannot stay on
+#: the other.
+N_STEER, N_THROTTLE = 3, 3
+
+
+def action_levels(n: int) -> np.ndarray:
+    """``n`` evenly spaced commands spanning ``[-1, 1]`` (just ``0`` if n == 1)."""
+    if n < 1:
+        raise ValueError("need at least one level")
+    if n == 1:
+        return np.zeros(1)
+    return np.linspace(-1.0, 1.0, n)
+
+
+def action_grid(n_steer: int = N_STEER, n_throttle: int = N_THROTTLE) -> np.ndarray:
+    """``(n_steer * n_throttle, 2)`` of ``(steer, throttle)`` in ``[-1, 1]``.
+
+    Row ``a`` is the action the flat categorical head calls ``a``, so this is
+    the single definition of what a discrete action *means*. It used to be
+    written out four times -- twice in environments and twice in filters, as
+    ``(a // 3 - 1, a % 3 - 1)`` -- and the two that matter most had to agree or
+    the safety filter would certify one action and the environment execute
+    another, silently. At the default resolution this reproduces that formula
+    exactly, so no measured result moves.
+    """
+    st = action_levels(n_steer)
+    th = action_levels(n_throttle)
+    return np.array([[st[a // n_throttle], th[a % n_throttle]]
+                     for a in range(n_steer * n_throttle)], dtype=np.float64)

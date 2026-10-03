@@ -43,7 +43,8 @@ from __future__ import annotations
 import numpy as np
 
 from rtrrl_playground.envs.vehicle import VehicleParams
-from rtrrl_playground.spaces import Box, Discrete, Env
+from rtrrl_playground.spaces import (N_STEER, N_THROTTLE, Box, Discrete,
+                                     Env, action_grid)
 
 STEER_MAX = 0.4  # rad, the steering-angle setpoint the simulator's PID takes
 SPEED_MAX = 4.0  # m/s
@@ -72,6 +73,7 @@ class ScuderiaLaneKeep(Env):
                  max_steps: int = 2000, control_repeat: int = 5,
                  start_pose=(0.0, 0.0, 0.0), grip: float | None = None,
                  track_half_width: float | None = None,
+                 n_steer: int = N_STEER, n_throttle: int = N_THROTTLE,
                  seed: int = 0, **make_kwargs):
         try:
             import jax
@@ -107,7 +109,12 @@ class ScuderiaLaneKeep(Env):
         self.action_mode = action_mode
         self.n_beams_out = int(n_beams_out)
         self.obs_dim = self.n_beams_out + int(observe_speed)
-        self.action_space = Discrete(9) if action_mode == "discrete" else Box(2)
+        # one definition of what a discrete action means, shared with the
+        # filters -- see `spaces.action_grid`
+        self.action_grid = action_grid(n_steer, n_throttle)
+        self.n_steer, self.n_throttle = int(n_steer), int(n_throttle)
+        self.action_space = (Discrete(len(self.action_grid))
+                             if action_mode == "discrete" else Box(2))
         self.max_steps = int(max_steps)
         self.start_pose = np.asarray(start_pose, dtype=float)
         self._key = jax.random.key(seed)
@@ -349,8 +356,7 @@ class ScuderiaLaneKeep(Env):
     def _decode(self, action) -> np.ndarray:
         """Action -> ``[steering angle, speed setpoint]``, the simulator's input."""
         if self.action_mode == "discrete":
-            a = int(action)
-            steer, throttle = a // 3 - 1, a % 3 - 1
+            steer, throttle = self.action_grid[int(action)]
         else:
             a = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
             steer, throttle = float(a[0]), float(a[1])
