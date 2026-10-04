@@ -111,6 +111,7 @@ class LaneKeep(Env):
                  n_steer: int = N_STEER, n_throttle: int = N_THROTTLE,
                  lookahead=None, aim_feature: bool = False,
                  steer_mode: str = "absolute", steer_rate: float = 2.0,
+                 drive_features: bool = False, proprio: bool = False,
                  start_jitter: float = 0.3, seed: int | None = None):
         if action_mode not in ("discrete", "continuous"):
             raise ValueError("action_mode must be 'discrete' or 'continuous'")
@@ -163,9 +164,14 @@ class LaneKeep(Env):
             raise ValueError("steer_mode must be 'absolute' or 'delta'")
         self.steer_mode, self.steer_rate = steer_mode, float(steer_rate)
         self.aim_feature = bool(aim_feature)
+        self.drive_features = bool(drive_features)   # see scuderia's notes
+        self.proprio = bool(proprio)
+        self._prev_vxy = None
         self.obs_dim = (self.n_beams + int(self.observe_speed)
                         + (0 if self.lookahead is None else len(self.lookahead))
-                        + int(self.aim_feature))
+                        + int(self.aim_feature)
+                        + 3 * int(self.drive_features)
+                        + 5 * int(self.proprio))
         # A flat softmax over steer x throttle rather than two heads: one
         # categorical distribution is one gradient to derive. The *resolution*
         # is `n_steer` x `n_throttle`, defaulting to the 3 x 3 every result
@@ -189,6 +195,7 @@ class LaneKeep(Env):
         self._s = 0.0
         self._t = 0
         self._stalled = 0
+        self._prev_vxy = None
         self.history: list[dict] = []
 
     def _decode(self, action) -> tuple[float, float]:
@@ -215,6 +222,24 @@ class LaneKeep(Env):
             from rtrrl_playground.envs.scripted import free_space_heading
             aim = free_space_heading(ranges, self.beam_angles)
             parts.append(np.array([np.clip(aim / HEADING_SCALE, -1.0, 1.0)]))
+        if self.drive_features:
+            from rtrrl_playground.envs.track import drive_features as _df
+            parts.append(_df(ranges, self.beam_angles, BEAM_RANGE))
+        if self.proprio:
+            vx, vy = self.v * np.cos(self.beta), self.v * np.sin(self.beta)
+            if self._prev_vxy is None:
+                ax = ay = 0.0
+            else:
+                pvx, pvy = self._prev_vxy
+                ax = (vx - pvx) / self.dt - self.yaw_rate * vy
+                ay = (vy - pvy) / self.dt + self.yaw_rate * vx
+            self._prev_vxy = (vx, vy)
+            parts.append(np.array([
+                self.v / self.vehicle.speed_max,
+                self.delta / self.vehicle.steer_max,
+                np.clip(self.yaw_rate / 3.0, -1.0, 1.0),
+                np.clip(ax / 10.0, -1.0, 1.0),
+                np.clip(ay / 10.0, -1.0, 1.0)]))
         self._last_beams = (ranges, flags)
         return np.concatenate(parts)
 

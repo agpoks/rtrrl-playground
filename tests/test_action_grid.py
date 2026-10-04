@@ -183,3 +183,38 @@ def test_filter_models_the_same_steering_the_env_does():
     assert safe.filter.model.steer_mode == "delta"
     assert safe.filter._first.steer_mode == "delta"
     assert safe.filter.model.steer_rate == 2.0
+
+
+# --- lidar drive cues and the car's own sensors ------------------------------
+
+def test_drive_features_read_speed_and_curvature_cues():
+    from rtrrl_playground.envs.track import drive_features
+    ang = np.linspace(-np.pi / 2, np.pi / 2, 61)
+
+    # a straight open corridor: far to go, nothing to turn for
+    f = drive_features(np.full(61, 8.0), ang, 10.0)
+    assert f[0] > 0.7, "free_ahead should be large on an open straight"
+    assert abs(f[1]) < 1e-9, "aim must be straight, not a tie-break artefact"
+    assert abs(f[2]) < 1e-9, "no bend on a straight"
+
+    # a wall straight ahead: the speed cue must collapse
+    w = np.full(61, 8.0); w[25:36] = 1.2
+    assert drive_features(w, ang, 10.0)[0] < 0.2
+
+
+def test_free_space_heading_breaks_ties_toward_straight_ahead():
+    """A bare argmax returns index 0 -- hard left -- on any uniform scan, and
+    uniform scans are the common case on an open track, not an edge case."""
+    from rtrrl_playground.envs.scripted import free_space_heading
+    ang = np.linspace(-np.pi / 2, np.pi / 2, 61)
+    assert abs(free_space_heading(np.full(61, 8.0), ang)) < 1e-9
+
+
+def test_proprio_is_what_the_car_publishes_and_excludes_sideslip():
+    """beta is a true state here and an EKF estimate on the car; training on it
+    would not transfer. The cell gets the signals the EKF integrates instead."""
+    base, env = LaneKeep(), LaneKeep(proprio=True)
+    assert env.obs_dim == base.obs_dim + 5
+    o = env.reset(seed=0)
+    assert len(o) == env.obs_dim
+    assert np.all(np.isfinite(o))

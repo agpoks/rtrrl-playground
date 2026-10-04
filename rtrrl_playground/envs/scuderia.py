@@ -76,6 +76,7 @@ class ScuderiaLaneKeep(Env):
                  n_steer: int = N_STEER, n_throttle: int = N_THROTTLE,
                  lookahead=None, aim_feature: bool = False,
                  steer_mode: str = "absolute", steer_rate: float = 2.0,
+                 drive_features: bool = False, proprio: bool = False,
                  seed: int = 0, **make_kwargs):
         try:
             import jax
@@ -118,6 +119,22 @@ class ScuderiaLaneKeep(Env):
                           else [float(v) for v in lookahead])
         # the pose-free sibling of `lookahead` -- see lanekeep's note
         self.aim_feature = bool(aim_feature)
+        #: Three scan-derived cues -- how far it is to the next obstruction
+        #: ahead, where the corridor opens, and which way it bends beyond that.
+        #: The speed cue is the point: a progress reward has nothing to slow
+        #: the car for a corner, and the policy currently has no feature from
+        #: which it could learn to anyway.
+        self.drive_features = bool(drive_features)
+        #: What the car's own sensors publish: speed (VESC), steering angle,
+        #: yaw rate and body accelerations (IMU). Deliberately *not* sideslip.
+        #: beta is available on the car as atan2(vy, vx) from `/ekf/state`, but
+        #: that vy is itself inferred from a bicycle model plus the IMU -- so
+        #: feeding beta here, where it is a true simulator state, trains a
+        #: policy on a quantity the car can only estimate. Giving the recurrent
+        #: cell the same raw signals the EKF integrates lets it form its own
+        #: estimate, which is what the memory is for and what transfers.
+        self.proprio = bool(proprio)
+        self._prev_vxy = None
         # How the steering half of an action is read. "absolute" places the
         # servo (the historical behaviour, and every published number); "delta"
         # moves it at `steer_rate` rad/s, so the command is a rate and the
@@ -136,7 +153,9 @@ class ScuderiaLaneKeep(Env):
         self.steer_mode, self.steer_rate = steer_mode, float(steer_rate)
         self.obs_dim = (self.n_beams_out + int(observe_speed)
                         + (0 if self.lookahead is None else len(self.lookahead))
-                        + int(self.aim_feature))
+                        + int(self.aim_feature)
+                        + 3 * int(self.drive_features)
+                        + 5 * int(self.proprio))
         # one definition of what a discrete action means, shared with the
         # filters -- see `spaces.action_grid`
         self.action_grid = action_grid(n_steer, n_throttle)
@@ -445,6 +464,28 @@ class ScuderiaLaneKeep(Env):
             m = np.abs(self.scan_angles) <= (np.pi / 2)
             aim = free_space_heading(scans[0][m], self.scan_angles[m])
             parts.append(np.array([np.clip(aim / HEADING_SCALE, -1.0, 1.0)]))
+        if self.drive_features:
+            from rtrrl_playground.envs.track import drive_features as _df
+            m = np.abs(self.scan_angles) <= (np.pi / 2)
+            parts.append(_df(scans[0][m], self.scan_angles[m], BEAM_RANGE))
+        if self.proprio:
+            # body-frame specific force, which is what an IMU reads:
+            #   ax = dvx/dt - r vy      ay = dvy/dt + r vx
+            v, beta, r_ = float(x[0, 3]), float(x[0, 6]), float(x[0, 5])
+            vx, vy = v * np.cos(beta), v * np.sin(beta)
+            if self._prev_vxy is None:
+                ax = ay = 0.0
+            else:
+                pvx, pvy = self._prev_vxy
+                ax = (vx - pvx) / self.dt - r_ * vy
+                ay = (vy - pvy) / self.dt + r_ * vx
+            self._prev_vxy = (vx, vy)
+            parts.append(np.array([
+                v / SPEED_MAX,
+                float(x[0, 2]) / STEER_MAX,
+                np.clip(r_ / 3.0, -1.0, 1.0),
+                np.clip(ax / 10.0, -1.0, 1.0),
+                np.clip(ay / 10.0, -1.0, 1.0)]))
         if self.lookahead is not None:
             from rtrrl_playground.envs.track import lookahead_features
             parts.append(lookahead_features(self.centreline, float(x[0, 0]),
@@ -507,6 +548,7 @@ class ScuderiaLaneKeep(Env):
         self._t = 0
         self._v_cmd = 1.0
         self._steer_cmd = 0.0
+        self._prev_vxy = None
         self._prev_s = None
         self.history = []
         self._x, self._scans = self._pull(self._state)

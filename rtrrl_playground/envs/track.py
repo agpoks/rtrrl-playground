@@ -373,3 +373,51 @@ def lookahead_features(centre, x, y, psi, lookaheads) -> np.ndarray:
     return np.array([np.clip(lookahead_heading_error(centre, x, y, psi, L)
                              / HEADING_SCALE, -1.0, 1.0)
                      for L in lookaheads], dtype=float)
+
+
+def drive_features(ranges: np.ndarray, angles: np.ndarray, beam_range: float,
+                   car_half_width: float = 0.20) -> np.ndarray:
+    """Speed and curvature cues from one scan: ``[free_ahead, aim, bend]``.
+
+    The three things a driver reads off the road ahead, and none of them is in
+    a raw beam vector in a form a linear readout can use:
+
+    ``free_ahead``  how far it is to the next obstruction straight ahead,
+        normalised. This is the speed cue -- "how fast may I go" is mostly
+        "how far can I see" -- and it is the quantity the scripted
+        wall-follower already thresholds on. A progress reward with no
+        curvature term has nothing to slow the car down; this at least gives a
+        policy the *information* to, which it currently does not have in any
+        usable form.
+
+    ``aim``  the free-space heading (:func:`..scripted.free_space_heading`),
+        restricted to the forward sector.
+
+    ``bend``  the same heading computed on the near half of the useful range
+        minus the far half. A single aim says where to point now; the
+        difference says which way the corridor is turning *beyond* that, which
+        is the curvature a single lookahead cannot express. On a straight it is
+        zero; entering a corner it leads the near aim.
+
+    All three come from the scan alone -- no map, no pose, no particle filter
+    -- so they survive the trip to a car that has 1080 beams and no reliable
+    localisation.
+    """
+    from rtrrl_playground.envs.scripted import free_space_heading
+    ang = np.asarray(angles, dtype=float)
+    r = np.asarray(ranges, dtype=float)
+    fwd = np.abs(ang) <= (np.pi / 2)
+    # straight ahead: a narrow cone, taken as a minimum because the nearest
+    # thing in it is what stops the car, not the average
+    cone = np.abs(ang) <= np.radians(12.0)
+    free_ahead = float(np.min(r[cone])) / beam_range if cone.any() else 1.0
+
+    aim = free_space_heading(r[fwd], ang[fwd], car_half_width)
+    # near vs far: clip the ranges, so "where does it open up within 2 m" and
+    # "within the whole visible range" are two different questions of one scan
+    near = np.minimum(r, 0.35 * beam_range)
+    aim_near = free_space_heading(near[fwd], ang[fwd], car_half_width)
+    bend = aim - aim_near
+    return np.array([np.clip(free_ahead, 0.0, 1.0),
+                     np.clip(aim / HEADING_SCALE, -1.0, 1.0),
+                     np.clip(bend / HEADING_SCALE, -1.0, 1.0)], dtype=float)

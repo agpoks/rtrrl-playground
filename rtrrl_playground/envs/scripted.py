@@ -110,7 +110,14 @@ def free_space_heading(ranges: np.ndarray, angles: np.ndarray,
         lo, hi = ((far, min(far + k + 1, n)) if far > near
                   else (max(far - k, 0), far + 1))
         ext[lo:hi] = np.minimum(ext[lo:hi], r[near])
-    return float(ang[int(np.argmax(ext))])
+    # Break ties toward straight ahead. On an open stretch every beam reads
+    # max range, every beam ties for furthest, and a bare argmax returns index
+    # zero -- which is hard left. The feature would then tell a policy to turn
+    # hard left on every straight, and the scripted gap-follower would do it.
+    # Ties are the common case on a wide track, not an edge case.
+    best = ext.max()
+    tied = np.flatnonzero(ext >= best - 1e-9)
+    return float(ang[tied[int(np.argmin(np.abs(ang[tied])))]])
 
 
 class GapFollower:
