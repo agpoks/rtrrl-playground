@@ -75,6 +75,7 @@ class ScuderiaLaneKeep(Env):
                  track_half_width: float | None = None,
                  n_steer: int = N_STEER, n_throttle: int = N_THROTTLE,
                  lookahead=None, aim_feature: bool = False,
+                 steer_mode: str = "absolute", steer_rate: float = 2.0,
                  seed: int = 0, **make_kwargs):
         try:
             import jax
@@ -117,6 +118,22 @@ class ScuderiaLaneKeep(Env):
                           else [float(v) for v in lookahead])
         # the pose-free sibling of `lookahead` -- see lanekeep's note
         self.aim_feature = bool(aim_feature)
+        # How the steering half of an action is read. "absolute" places the
+        # servo (the historical behaviour, and every published number); "delta"
+        # moves it at `steer_rate` rad/s, so the command is a rate and the
+        # angle is the integral of the policy's choices.
+        #
+        # The case for "delta" is that the throttle in this adapter has always
+        # worked that way -- `_v_cmd` ramps rather than being placed -- so
+        # absolute steering was the inconsistent half. It matters because with
+        # three absolute levels there is no steering angle between 0 and 22.9
+        # deg in the action set at all, so holding a gentle curve requires
+        # dithering between the lock stops: measured, the sign reverses every
+        # 3 steps and the car weaves +/-0.5 m. With three *rates* the policy can
+        # walk to any angle and stay there.
+        if steer_mode not in ("absolute", "delta"):
+            raise ValueError("steer_mode must be 'absolute' or 'delta'")
+        self.steer_mode, self.steer_rate = steer_mode, float(steer_rate)
         self.obs_dim = (self.n_beams_out + int(observe_speed)
                         + (0 if self.lookahead is None else len(self.lookahead))
                         + int(self.aim_feature))
@@ -133,6 +150,15 @@ class ScuderiaLaneKeep(Env):
         # so the nine numbers the agent sees mean the same thing they do in
         # envs/lanekeep.py: right to left, straight ahead in the middle.
         self._idx = np.linspace(0, num_beams - 1, self.n_beams_out).astype(int)
+        # The simulator's real field of view, read from it rather than assumed.
+        # It is 4.7 rad (269 deg) -- the same span the car's own /scan reports
+        # -- not the +/-pi/2 that several callers here have guessed. Beam
+        # angles built on the wrong span do not fail loudly; they just point
+        # every derived direction at the wrong part of the world.
+        _fov = float(getattr(getattr(self.env, "scan_sim", None), "fov", 4.7))
+        self.scan_fov = _fov
+        self.scan_angles = np.linspace(-_fov / 2, _fov / 2, num_beams)
+        self.beam_angles = self.scan_angles[self._idx]
         # A centreline turns "distance travelled" into "progress along the
         # track", which is what lanekeep pays and therefore the only reward
         # under which a number here is comparable with one from there. Without
@@ -376,7 +402,13 @@ class ScuderiaLaneKeep(Env):
             a = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
             steer, throttle = float(a[0]), float(a[1])
         self._v_cmd = float(np.clip(self._v_cmd + throttle * 1.0 * self.dt, 0.0, SPEED_MAX))
-        return np.array([steer * STEER_MAX, self._v_cmd])
+        if self.steer_mode == "delta":
+            self._steer_cmd = float(np.clip(
+                self._steer_cmd + steer * self.steer_rate * self.dt,
+                -STEER_MAX, STEER_MAX))
+        else:
+            self._steer_cmd = float(steer) * STEER_MAX
+        return np.array([self._steer_cmd, self._v_cmd])
 
     def _pull(self, state):
         """Bring one step's worth of device arrays across, in two transfers.
@@ -396,8 +428,22 @@ class ScuderiaLaneKeep(Env):
         if self.aim_feature:
             from rtrrl_playground.envs.scripted import free_space_heading
             from rtrrl_playground.envs.track import HEADING_SCALE
-            ang = np.linspace(-np.pi / 2, np.pi / 2, self.n_beams_out)
-            aim = free_space_heading(parts[0] * BEAM_RANGE, ang)
+            # Computed from the *raw* scan, not the handful of beams the policy
+            # sees. That is not cheating and it is not privileged: the car's
+            # lidar publishes 1080 beams whatever the policy is given, so
+            # deriving one scalar from all of them is what the ROS node would
+            # actually do. Computing it from 9 downsampled beams instead -- as
+            # the first version of this did -- gives the direction a ~20 deg
+            # quantisation and measures the downsampling rather than the idea.
+            # Forward sector only. The scan spans 269 deg, so the furthest
+            # free space in a corridor is frequently *behind* the car -- the
+            # open track it has already driven. Aiming there is meaningless for
+            # a vehicle with 22.9 deg of lock, and measured, the unrestricted
+            # version saturated the feature at +/-1 most of the time. +/-90 deg
+            # is also exactly the span `HEADING_SCALE` normalises, so a hard
+            # left aim reads as -1 and a hard right as +1 rather than clipping.
+            m = np.abs(self.scan_angles) <= (np.pi / 2)
+            aim = free_space_heading(scans[0][m], self.scan_angles[m])
             parts.append(np.array([np.clip(aim / HEADING_SCALE, -1.0, 1.0)]))
         if self.lookahead is not None:
             from rtrrl_playground.envs.track import lookahead_features
@@ -460,6 +506,7 @@ class ScuderiaLaneKeep(Env):
         _obs, self._state = self.env.reset(self._split(), poses)
         self._t = 0
         self._v_cmd = 1.0
+        self._steer_cmd = 0.0
         self._prev_s = None
         self.history = []
         self._x, self._scans = self._pull(self._state)

@@ -136,3 +136,50 @@ def test_aim_feature_matches_the_gap_follower_it_is_extracted_from():
     expected = np.clip(free_space_heading(ranges, env.beam_angles) / HEADING_SCALE,
                        -1.0, 1.0)
     assert np.isclose(env._obs()[-1], expected)
+
+
+# --- delta (rate) steering --------------------------------------------------
+# Three absolute steering levels contain no angle between 0 and 22.9 deg, so a
+# gentle curve can only be held by dithering between the stops. Three *rates*
+# can reach and hold any angle. Off by default: every published number is on
+# absolute steering.
+
+def test_steer_mode_defaults_to_absolute_and_is_unchanged():
+    env = LaneKeep()
+    assert env.steer_mode == "absolute"
+    env.reset(seed=0)
+    for _ in range(20):
+        env.step(6)                      # steer +1, throttle 0
+    # absolute: full lock is reached and held by the servo lag
+    assert env.delta > 0.30
+
+
+def test_delta_mode_walks_the_servo_and_can_hold_a_middle_angle():
+    env = LaneKeep(steer_mode="delta", steer_rate=2.0)
+    env.reset(seed=0)
+    for _ in range(3):
+        env.step(6)                      # three ticks of +rate
+    mid = env.delta
+    assert 0.0 < mid < 0.40, "should be partway, not at a stop"
+    for _ in range(10):
+        env.step(3)                      # steer 0 -> hold
+    assert np.isclose(env.delta, mid, atol=1e-9), "zero rate must hold the angle"
+
+
+def test_delta_mode_cannot_exceed_the_lock():
+    env = LaneKeep(steer_mode="delta", steer_rate=50.0)
+    env.reset(seed=0)
+    for _ in range(10):
+        env.step(6)
+    assert abs(env.delta) <= env.vehicle.steer_max + 1e-12
+
+
+def test_filter_models_the_same_steering_the_env_does():
+    """An absolute-steering filter in front of a rate-steering car certifies a
+    plan the car cannot execute, and nothing would raise."""
+    env = LaneKeep(steer_mode="delta", steer_rate=2.0)
+    safe = make_safe(type("A", (), {"start": lambda s, o: 0,
+                                    "step": lambda s, *a: 0})(), env)
+    assert safe.filter.model.steer_mode == "delta"
+    assert safe.filter._first.steer_mode == "delta"
+    assert safe.filter.model.steer_rate == 2.0

@@ -84,8 +84,14 @@ class BicycleModel:
     """
 
     def __init__(self, dt: float = 0.05, grip: float = 1.0,
-                 params: VehicleParams | None = None):
+                 params: VehicleParams | None = None,
+                 steer_mode: str = "absolute", steer_rate: float = 2.0):
         self.dt, self.grip = float(dt), float(grip)
+        # How the environment interprets the steering half of an action. The
+        # filter certifies actions, so if it models this differently from the
+        # environment it certifies something the car will not do -- the same
+        # class of silent mismatch the shared `action_grid` removed.
+        self.steer_mode, self.steer_rate = steer_mode, float(steer_rate)
         # The filter's *belief* about the car, which need not be the car. This
         # is the same mismatch as `grip`, generalised: hand it the simulator's
         # parameters while the plant is a different vehicle and you get exactly
@@ -98,7 +104,12 @@ class BicycleModel:
         x, y, psi, v, delta = s.T
         steer = np.asarray(steer, dtype=np.float64)
         throttle = np.asarray(throttle, dtype=np.float64)
-        delta = delta + (steer * p.steer_max - delta) * self.dt / p.steer_tau
+        if self.steer_mode == "delta":
+            # the action is a *rate*: it moves the servo rather than placing it
+            delta = np.clip(delta + steer * self.steer_rate * self.dt,
+                            -p.steer_max, p.steer_max)
+        else:
+            delta = delta + (steer * p.steer_max - delta) * self.dt / p.steer_tau
         v = np.clip(v + (throttle * p.accel_max - p.drag * v) * self.dt, 0.0, p.speed_max)
         psi_dot = v / p.wheelbase * np.tan(delta)
         limit = np.where(v > 1e-3, p.a_lat_max * self.grip / np.maximum(v, 1e-3), np.inf)
@@ -136,17 +147,19 @@ class PredictiveSafetyFilter:
                  margin: float = 0.05, stop_speed: float = 0.25,
                  obstacle_radius: float = 0.44, credit: str = "executed",
                  recover_at_standstill: bool = False, n_actions: int = 9,
-                 action_grid=None):
+                 action_grid=None, steer_mode: str = "absolute",
+                 steer_rate: float = 2.0):
         if credit not in ("executed", "proposed"):
             raise ValueError("credit must be 'executed' or 'proposed'")
         self.track = track
         self.dt = float(dt)
         self.predict_dt = float(dt) * float(predict_dt_scale)
         self.assumed_vehicle = assumed_vehicle or VehicleParams()
+        _sm = dict(steer_mode=steer_mode, steer_rate=steer_rate)
         self.model = BicycleModel(dt=self.predict_dt, grip=assumed_grip,
-                                  params=self.assumed_vehicle)
+                                  params=self.assumed_vehicle, **_sm)
         self._first = BicycleModel(dt=float(dt), grip=assumed_grip,
-                                   params=self.assumed_vehicle)
+                                   params=self.assumed_vehicle, **_sm)
         self.horizon, self.margin = int(horizon), float(margin)
         self.stop_speed, self.obstacle_radius = float(stop_speed), float(obstacle_radius)
         self.recover_at_standstill = bool(recover_at_standstill)
@@ -510,6 +523,11 @@ def make_safe(agent, env, credit: str = "executed", assume_env_vehicle: bool = T
     # at any other resolution it would certify one action and the env execute
     # another.
     filter_kwargs.setdefault("action_grid", getattr(env, "action_grid", None))
+    # ...and how that action's steering half is interpreted, for the same
+    # reason: an absolute-steering filter in front of a rate-steering car
+    # certifies a plan the car cannot execute.
+    filter_kwargs.setdefault("steer_mode", getattr(env, "steer_mode", "absolute"))
+    filter_kwargs.setdefault("steer_rate", getattr(env, "steer_rate", 2.0))
     filt = PredictiveSafetyFilter(env.track, dt=env.dt, credit=credit, **filter_kwargs)
 
     def state_fn():

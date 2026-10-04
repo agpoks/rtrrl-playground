@@ -110,6 +110,7 @@ class LaneKeep(Env):
                  dt: float = 0.05, max_steps: int = 600,
                  n_steer: int = N_STEER, n_throttle: int = N_THROTTLE,
                  lookahead=None, aim_feature: bool = False,
+                 steer_mode: str = "absolute", steer_rate: float = 2.0,
                  start_jitter: float = 0.3, seed: int | None = None):
         if action_mode not in ("discrete", "continuous"):
             raise ValueError("action_mode must be 'discrete' or 'continuous'")
@@ -156,6 +157,11 @@ class LaneKeep(Env):
         # instead of from a map and a localised pose. On the car that is the
         # difference between needing a particle filter at control rate and
         # needing nothing the policy did not already receive.
+        # see scuderia's note: "delta" makes the steering command a rate, so
+        # the action set can express angles between the lock stops
+        if steer_mode not in ("absolute", "delta"):
+            raise ValueError("steer_mode must be 'absolute' or 'delta'")
+        self.steer_mode, self.steer_rate = steer_mode, float(steer_rate)
         self.aim_feature = bool(aim_feature)
         self.obs_dim = (self.n_beams + int(self.observe_speed)
                         + (0 if self.lookahead is None else len(self.lookahead))
@@ -308,7 +314,12 @@ class LaneKeep(Env):
         a_cap = a_traction * float(p.throttle_grip_share)
         h = self.dt / max(p.n_substeps, 1)
         for _ in range(max(p.n_substeps, 1)):
-            self.delta += (steer * p.steer_max + p.steer_bias - self.delta) * h / p.steer_tau
+            if self.steer_mode == "delta":
+                self.delta = float(np.clip(self.delta + steer * self.steer_rate * h,
+                                           -p.steer_max, p.steer_max))
+            else:
+                self.delta += (steer * p.steer_max + p.steer_bias
+                               - self.delta) * h / p.steer_tau
             # A tyre cannot push harder than it grips, and the limit belongs
             # to the *driven* axle rather than to the car. Drag is separated
             # out because it is aerodynamic and rolling resistance, not a
@@ -376,7 +387,12 @@ class LaneKeep(Env):
         # steer_bias is a servo trim that is not quite centred: the commanded
         # zero is not the car's zero. It is the single most common real defect
         # and the one a policy trained in simulation has never seen.
-        self.delta += (steer * p.steer_max + p.steer_bias - self.delta) * self.dt / p.steer_tau
+        if self.steer_mode == "delta":
+            self.delta = float(np.clip(self.delta + steer * self.steer_rate * self.dt,
+                                       -p.steer_max, p.steer_max))
+        else:
+            self.delta += (steer * p.steer_max + p.steer_bias
+                           - self.delta) * self.dt / p.steer_tau
         self.v += (throttle * p.accel_max * p.throttle_scale - p.drag * self.v) * self.dt
         self.v = float(np.clip(self.v, 0.0, p.speed_max))
         psi_dot = self.v / p.wheelbase * np.tan(self.delta)
