@@ -77,6 +77,7 @@ class ScuderiaLaneKeep(Env):
                  lookahead=None, aim_feature: bool = False,
                  steer_mode: str = "absolute", steer_rate: float = 2.0,
                  drive_features: bool = False, proprio: bool = False,
+                 grip_feature: bool = False,
                  seed: int = 0, **make_kwargs):
         try:
             import jax
@@ -134,7 +135,22 @@ class ScuderiaLaneKeep(Env):
         #: cell the same raw signals the EKF integrates lets it form its own
         #: estimate, which is what the memory is for and what transfers.
         self.proprio = bool(proprio)
+        #: How much of the tyres' friction budget is in use right now, as a
+        #: fraction: sqrt(ax^2 + ay^2) / (mu g). The project has a fitted tyre
+        #: model -- `rc10_default.yaml` records mu = 1.10 measured from
+        #: Fy_peak = 18 N at Fz = 16.4 N -- and uses it in exactly one place,
+        #: the phase-plane barrier, to decide *when to learn*. Nothing tells
+        #: the policy how much grip it has left.
+        #:
+        #: This does, from one scalar, and it is the rare feature that is
+        #: *easier* on the car than in simulation: both accelerations come
+        #: straight off the IMU, so no model, no state estimator and no map is
+        #: involved. A policy that can see it has the information to keep a
+        #: margin; measured, the car departs at a grip usage of about 1.0,
+        #: which is at the limit rather than far beyond it.
+        self.grip_feature = bool(grip_feature)
         self._prev_vxy = None
+        self._prev_g = None
         # How the steering half of an action is read. "absolute" places the
         # servo (the historical behaviour, and every published number); "delta"
         # moves it at `steer_rate` rad/s, so the command is a rate and the
@@ -155,7 +171,8 @@ class ScuderiaLaneKeep(Env):
                         + (0 if self.lookahead is None else len(self.lookahead))
                         + int(self.aim_feature)
                         + 3 * int(self.drive_features)
-                        + 5 * int(self.proprio))
+                        + 5 * int(self.proprio)
+                        + int(self.grip_feature))
         # one definition of what a discrete action means, shared with the
         # filters -- see `spaces.action_grid`
         self.action_grid = action_grid(n_steer, n_throttle)
@@ -486,6 +503,20 @@ class ScuderiaLaneKeep(Env):
                 np.clip(r_ / 3.0, -1.0, 1.0),
                 np.clip(ax / 10.0, -1.0, 1.0),
                 np.clip(ay / 10.0, -1.0, 1.0)]))
+        if self.grip_feature:
+            v, beta, r_ = float(x[0, 3]), float(x[0, 6]), float(x[0, 5])
+            vx, vy = v * np.cos(beta), v * np.sin(beta)
+            if self._prev_g is None:
+                ax = ay = 0.0
+            else:
+                pvx, pvy = self._prev_g
+                ax = (vx - pvx) / self.dt - r_ * vy
+                ay = (vy - pvy) / self.dt + r_ * vx
+            self._prev_g = (vx, vy)
+            # 1.0 means the tyres are saturated; the budget is the measured
+            # peak friction, not a generic constant
+            parts.append(np.array([
+                np.clip(np.hypot(ax, ay) / (self.grip * 9.81), 0.0, 2.0) / 2.0]))
         if self.lookahead is not None:
             from rtrrl_playground.envs.track import lookahead_features
             parts.append(lookahead_features(self.centreline, float(x[0, 0]),
