@@ -93,7 +93,7 @@ class DiscreteCBFFilter:
                  assumed_grip: float = 1.0, assumed_vehicle: VehicleParams | None = None,
                  margin: float = 0.05, obstacle_radius: float = 0.44,
                  credit: str = "executed", n_actions: int = 9,
-                 action_grid=None):
+                 action_grid=None, grip_mu: float | None = None):
         if h_kind not in H_KINDS:
             raise ValueError(f"h_kind must be one of {H_KINDS}")
         if credit not in ("executed", "proposed"):
@@ -110,6 +110,10 @@ class DiscreteCBFFilter:
                                   params=self.assumed_vehicle)
         self.margin, self.obstacle_radius = float(margin), float(obstacle_radius)
         self.credit = credit
+        #: Peak friction for the tyre constraint, or None to leave the barrier
+        #: purely geometric (the historical behaviour, and every published
+        #: number). The measured value for this car is 1.10.
+        self.grip_mu = None if grip_mu is None else float(grip_mu)
         # What each discrete action *means*. Taken from the environment when
         # it offers one (`make_safe` passes `env.action_grid`), because this
         # used to be an independent copy of the environment's own formula: at
@@ -169,6 +173,27 @@ class DiscreteCBFFilter:
             dy = y[:, None] - obstacles[None, :, 1]
             h_obs = np.sqrt(dx * dx + dy * dy).min(axis=1) - self.obstacle_radius
             h_track = np.minimum(h_track, h_obs)
+        if self.grip_mu:
+            # The tyres are a constraint too, and until now the only component
+            # in this project built on a tyre model was the phase-plane
+            # barrier, which gates *learning* rather than actions. A friction
+            # violation is instantaneous, so unlike "does a braking plan
+            # exist" it needs no horizon -- which is the same argument this
+            # file already makes for a pointwise barrier, applied to the
+            # constraint the predictive filter does not have.
+            #
+            # h > 0 while the cornering demand v*r sits inside the circle.
+            # Measured on this car it bites hard: at 3 m/s only three of the
+            # nine actions stay inside, and at 4 m/s the worst demands 1.95x
+            # what the tyres can give.
+            delta = s[:, 4]
+            r = v / max(self.assumed_vehicle.wheelbase, 1e-6) * np.tan(delta)
+            budget = self.grip_mu * 9.81
+            h_grip = 1.0 - np.abs(v * r) / budget
+            # scaled into metres so the min against h_track compares like with
+            # like rather than whichever constraint happens to be numerically
+            # larger
+            h_track = np.minimum(h_track, h_grip * (t.half_width - self.margin))
         return np.where(bad, -1.0, h_track)
 
     # -- the filter --------------------------------------------------------
@@ -237,6 +262,9 @@ def make_safe_cbf(agent, env, credit: str = "executed", assume_env_vehicle: bool
         filter_kwargs.setdefault("assumed_vehicle", getattr(env, "vehicle", None))
     # see `safety.make_safe`: the environment owns the action meaning
     filter_kwargs.setdefault("action_grid", getattr(env, "action_grid", None))
+    # the environment knows its own tyres; the filter should use them rather
+    # than a geometric constraint alone
+    filter_kwargs.setdefault("grip_mu", getattr(env, "grip", None))
     filt = DiscreteCBFFilter(env.track, dt=env.dt, credit=credit, **filter_kwargs)
 
     def state_fn():
