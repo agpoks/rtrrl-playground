@@ -78,6 +78,7 @@ class ScuderiaLaneKeep(Env):
                  steer_mode: str = "absolute", steer_rate: float = 2.0,
                  drive_features: bool = False, proprio: bool = False,
                  grip_feature: bool = False,
+                 grip_penalty: float = 0.0, grip_target: float = 0.8,
                  seed: int = 0, **make_kwargs):
         try:
             import jax
@@ -148,6 +149,25 @@ class ScuderiaLaneKeep(Env):
         #: involved. A policy that can see it has the information to keep a
         #: margin; measured, the car departs at a grip usage of about 1.0,
         #: which is at the limit rather than far beyond it.
+        #: Price the friction budget in the reward. Off by default (0.0) and
+        #: that default is load-bearing: every number this project has
+        #: published is on a pure progress reward.
+        #:
+        #: The gap it closes: progress pays about +1 per step and nothing else
+        #: is priced, so going flat out is *optimal* right up to the crash.
+        #: Measured, the policy drives at 3.4-3.9 m/s and departs with the
+        #: tyres saturated (grip usage 0.90 at 41-64 % of exits), while pure
+        #: pursuit laps the same track holding 69 % of the tyres in reserve.
+        #: Every feature added so far -- free_ahead, the lookahead, the grip
+        #: reading itself -- gives the policy the information to keep a margin.
+        #: None of them gives it a reason to.
+        #:
+        #: Penalises only the part above `grip_target`, so ordinary cornering
+        #: is free and the term is silent until the car is actually leaning on
+        #: the tyres. Uses `a_lat = v r` against the *measured* peak friction
+        #: rather than a generic constant.
+        self.grip_penalty = float(grip_penalty)
+        self.grip_target = float(grip_target)
         self.grip_feature = bool(grip_feature)
         self._prev_vxy = None
         self._prev_g = None
@@ -600,6 +620,10 @@ class ScuderiaLaneKeep(Env):
         self._x, self._scans = self._pull(self._state)
         crashed = bool(np.asarray(self._state.collisions)[0])
         reward = self._reward(self._x, x_prev)
+        if self.grip_penalty:
+            xx = self._x[0]
+            usage = abs(float(xx[3]) * float(xx[5])) / (self.grip * 9.81)
+            reward -= self.grip_penalty * max(0.0, usage - self.grip_target)
         self._t += 1
         x = self._x[0]
         self.history.append(dict(x=float(x[0]), y=float(x[1]), psi=float(x[4]),
