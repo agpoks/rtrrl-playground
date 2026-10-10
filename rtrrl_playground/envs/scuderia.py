@@ -79,6 +79,7 @@ class ScuderiaLaneKeep(Env):
                  drive_features: bool = False, proprio: bool = False,
                  grip_feature: bool = False,
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
+                 accel_max: float = 1.0, brake_max: float | None = None,
                  seed: int = 0, **make_kwargs):
         try:
             import jax
@@ -312,6 +313,27 @@ class ScuderiaLaneKeep(Env):
         # (0.15/s would have added 0.6 m/s^2 at that speed and did not).
         #
         # ``wheelbase`` is the simulator's own 0.1705 + 0.1515.
+        #: How fast the speed setpoint may ramp, up and down, m/s^2. These were
+        #: one number -- `_decode` ramped at a symmetric 1.0 -- which capped
+        #: deceleration at 9 % of the 10.8 m/s^2 the tyres can supply. The car
+        #: coasted rather than braked.
+        #:
+        #: The asymmetry is the physical case, not a tuning knob. Accelerating
+        #: is limited by the drivetrain (1.13 m/s^2 measured) and braking by the
+        #: tyres (mu g = 10.8), so a single rate has to be wrong for one of
+        #: them. It was wrong for braking, and it cost this track's two hairpins:
+        #: at R = 0.82 m the apex allows 2.88 m/s, and shedding 3.9 -> 2.88 at
+        #: 1.0 m/s^2 takes 3.47 m while the longest lookahead feature sees 2.0.
+        #: The policy could not see the corner until it was inside its own
+        #: stopping distance.
+        #:
+        #: `brake_max=None` keeps the symmetric behaviour, so every result
+        #: measured before this existed still reproduces.
+        self.accel_max = float(accel_max)
+        self.brake_max = float(accel_max if brake_max is None else brake_max)
+        # The filter deliberately keeps the *conservative* figure: one that
+        # underestimates braking certifies plans the car can over-deliver on,
+        # and the reverse is what `bridges.safety.make_safe_agent` warns about.
         self.vehicle = VehicleParams(wheelbase=0.322, accel_max=1.0, drag=0.0)
         self.grip = self._read_grip() if grip is None else float(grip)
 
@@ -457,7 +479,9 @@ class ScuderiaLaneKeep(Env):
         else:
             a = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
             steer, throttle = float(a[0]), float(a[1])
-        self._v_cmd = float(np.clip(self._v_cmd + throttle * 1.0 * self.dt, 0.0, SPEED_MAX))
+        rate = self.accel_max if throttle >= 0.0 else self.brake_max
+        self._v_cmd = float(np.clip(self._v_cmd + throttle * rate * self.dt,
+                                    0.0, SPEED_MAX))
         if self.steer_mode == "delta":
             self._steer_cmd = float(np.clip(
                 self._steer_cmd + steer * self.steer_rate * self.dt,
