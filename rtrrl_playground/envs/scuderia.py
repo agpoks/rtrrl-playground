@@ -198,8 +198,9 @@ class ScuderiaLaneKeep(Env):
         # filters -- see `spaces.action_grid`
         self.action_grid = action_grid(n_steer, n_throttle)
         self.n_steer, self.n_throttle = int(n_steer), int(n_throttle)
-        self.action_space = (Discrete(len(self.action_grid))
-                             if action_mode == "discrete" else Box(2))
+        self.action_space = (
+            Discrete(len(self.action_grid), nvec=(int(n_steer), int(n_throttle)))
+            if action_mode == "discrete" else Box(2))
         self.max_steps = int(max_steps)
         self.start_pose = np.asarray(start_pose, dtype=float)
         self._key = jax.random.key(seed)

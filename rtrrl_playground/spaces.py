@@ -21,9 +21,17 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Discrete:
-    """``n`` mutually exclusive actions, encoded to the network as a one-hot."""
+    """``n`` mutually exclusive actions, encoded to the network as a one-hot.
+
+    ``nvec`` optionally records that those ``n`` actions are the product of
+    independent axes -- ``(n_steer, n_throttle)`` for a driving grid. The
+    environment still exchanges a single flat index, so filters and encodings
+    are untouched; it only lets an actor factor its policy instead of running
+    one softmax over the product, which at 0.1 resolution is 441 ways wide.
+    """
 
     n: int
+    nvec: tuple[int, ...] | None = None
 
     @property
     def flat_dim(self) -> int:
