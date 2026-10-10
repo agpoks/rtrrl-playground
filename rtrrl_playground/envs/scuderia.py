@@ -80,6 +80,8 @@ class ScuderiaLaneKeep(Env):
                  grip_feature: bool = False,
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
                  accel_max: float = 1.0, brake_max: float | None = None,
+                 throttle_mode: str = "ramp", accel_cmd: float = 10.0,
+                 rolling_start: float = 1.0,
                  seed: int = 0, **make_kwargs):
         try:
             import jax
@@ -100,6 +102,22 @@ class ScuderiaLaneKeep(Env):
         # get an unhelpful error out of an adapter that guessed.
         if tire_model is not None:
             make_kwargs["tire_model"] = tire_model
+        # Before `make`, not after: the simulator is constructed on the next
+        # statement and a kwarg set later never reaches it. Setting it late
+        # left `ModelSpec.ctrl_mode` at 0, so what looked like acceleration
+        # control was speed control being handed +/-10 as a *setpoint* -- the
+        # PID saturated and the car appeared to brake at a_max, which is a
+        # flattering measurement of the wrong thing.
+        if throttle_mode not in ("ramp", "accl"):
+            raise ValueError(
+                f"throttle_mode must be ramp or accl, got {throttle_mode!r}")
+        self.throttle_mode = str(throttle_mode)
+        if self.throttle_mode == "accl":
+            # the int, not the name: `make` writes whatever it is handed onto
+            # the ModelSpec without passing it through `ctrl_code_from_name`,
+            # so the string "accl" never equals CTRL_ACCL and is silently
+            # ignored. Measured: string and default give identical rollouts.
+            make_kwargs.setdefault("ctrl_mode", 1)
         # map_ext matters: the maps that ship with the simulator are a mix of
         # .png and .pgm, and the loader takes the extension as an argument
         # rather than looking. ``levine`` is a .pgm; ``berlin``, ``skirk``,
@@ -332,6 +350,37 @@ class ScuderiaLaneKeep(Env):
         #: measured before this existed still reproduces.
         self.accel_max = float(accel_max)
         self.brake_max = float(accel_max if brake_max is None else brake_max)
+        #: What the throttle axis *means*.
+        #:
+        #: ``"ramp"`` is the ROS2 Ackermann convention the simulator defaults
+        #: to: the action nudges a speed setpoint and a PID chases it. It is
+        #: the wrong interface for this car. The setpoint can only move at
+        #: ``accel_max``, so the whole axis spans +/-1 m/s^2 however many
+        #: levels it is given -- 9 % of the 10.8 the tyres supply and 9 A of
+        #: the ESC's 100 -- and the policy cannot ask for a force at all, only
+        #: for a speed it would like to have soon.
+        #:
+        #: ``"accl"`` commands longitudinal acceleration directly, bypassing
+        #: the PID (``ctrl_mode=CTRL_ACCL``). That is the quantity the
+        #: friction circle is written in, the quantity ``bridges/friction.py``
+        #: filters actions against, and one constant away from the motor
+        #: current the real ESC takes: a = K_tG * I / (r m) = 0.106 I, so the
+        #: +/-``accel_cmd`` range below is +/-94 A of a 100 A controller.
+        #:
+        #: ``accel_cmd`` defaults to 10.0 m/s^2, just inside mu g = 10.8, so
+        #: the axis spans what the tyres can actually deliver and the friction
+        #: circle -- not the action set -- is what bounds it.
+        self.accel_cmd = float(accel_cmd)
+        #: m/s the car is placed at on reset in accl mode, matching the speed
+        #: the ramp-mode setpoint produces. 0.0 disables it.
+        self.rolling_start = float(rolling_start)
+        if self.throttle_mode == "accl":
+            # The kernels read the mode off the ModelSpec, and `make()` writes
+            # whatever it is handed: passing the *string* "accl" leaves it
+            # uncoverted and the comparison against CTRL_ACCL silently fails,
+            # so the car keeps running in speed mode. Measured: string and
+            # default give byte-identical rollouts. Pass the int.
+            make_kwargs.setdefault("ctrl_mode", 1)
         # The filter deliberately keeps the *conservative* figure: one that
         # underestimates braking certifies plans the car can over-deliver on,
         # and the reverse is what `bridges.safety.make_safe_agent` warns about.
@@ -480,9 +529,24 @@ class ScuderiaLaneKeep(Env):
         else:
             a = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
             steer, throttle = float(a[0]), float(a[1])
-        rate = self.accel_max if throttle >= 0.0 else self.brake_max
-        self._v_cmd = float(np.clip(self._v_cmd + throttle * rate * self.dt,
-                                    0.0, SPEED_MAX))
+        if self.throttle_mode == "accl":
+            # a direct acceleration command; no integration, and deliberately
+            # no clip to SPEED_MAX -- that clip is a property of a *setpoint*,
+            # and applying it here would cap the command at 4 (m/s^2 here,
+            # amps in current mode) and quietly make the car slower
+            a = float(throttle) * self.accel_cmd
+            # Braking stops the car; it does not reverse it. Ramp mode clipped
+            # the setpoint to [0, SPEED_MAX], so reverse was unreachable there
+            # and the two modes would not otherwise be comparable -- measured,
+            # a uniform-random policy in accl mode settles at -0.83 m/s and
+            # runs the lap backwards. Capped at exactly the deceleration that
+            # reaches standstill within this step.
+            v_now = float(self._x[0, 3]) if self._x is not None else 0.0
+            self._v_cmd = max(a, -v_now / max(self.dt, 1e-6))
+        else:
+            rate = self.accel_max if throttle >= 0.0 else self.brake_max
+            self._v_cmd = float(np.clip(self._v_cmd + throttle * rate * self.dt,
+                                        0.0, SPEED_MAX))
         if self.steer_mode == "delta":
             self._steer_cmd = float(np.clip(
                 self._steer_cmd + steer * self.steer_rate * self.dt,
@@ -622,7 +686,19 @@ class ScuderiaLaneKeep(Env):
         poses = jnp.asarray(self.start_pose).reshape(1, 3)
         _obs, self._state = self.env.reset(self._split(), poses)
         self._t = 0
-        self._v_cmd = 1.0
+        # Ramp mode starts with a 1 m/s *setpoint*, so the PID pulls the car
+        # away from the line on its own and an untrained policy is always
+        # moving. In accl mode the slot holds an acceleration, where the same
+        # 1.0 would be a stray command and a fresh policy -- symmetric over
+        # +/-accel_cmd, so mean zero -- never gets the car rolling at all.
+        # Measured: 92 % of episodes ended `stalled`, i.e. the mode change
+        # would have been scored on an exploration artefact rather than on
+        # control authority. Both modes therefore get the same rolling start,
+        # one as a setpoint and one as an actual speed.
+        self._v_cmd = 0.0 if self.throttle_mode == "accl" else 1.0
+        if self.throttle_mode == "accl" and self.rolling_start:
+            self._state = self._state.replace(
+                x=self._state.x.at[0, 3].set(float(self.rolling_start)))
         self._steer_cmd = 0.0
         self._prev_vxy = None
         self._prev_s = None
