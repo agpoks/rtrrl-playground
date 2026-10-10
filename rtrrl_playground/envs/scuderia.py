@@ -542,7 +542,17 @@ class ScuderiaLaneKeep(Env):
             # runs the lap backwards. Capped at exactly the deceleration that
             # reaches standstill within this step.
             v_now = float(self._x[0, 3]) if self._x is not None else 0.0
-            self._v_cmd = max(a, -v_now / max(self.dt, 1e-6))
+            # Ramp mode clipped its setpoint to [0, SPEED_MAX], which gave the
+            # car a top speed and a reverse floor as a side effect of the
+            # parameterisation. Commanding acceleration has neither unless it
+            # is said, and leaving it unsaid made accl a 15 m/s car racing a
+            # 4 m/s one: it arrived at the first corner -- R = 1.04 m at
+            # s = 7 m, good for 3.25 m/s -- doing 6.57 against ramp's 3.90,
+            # and 46-90 % of episodes ended `overspeed`. The envelope is the
+            # same in both modes; only the way of expressing it differs.
+            hi = (SPEED_MAX - v_now) / max(self.dt, 1e-6)
+            lo = -v_now / max(self.dt, 1e-6)
+            self._v_cmd = float(np.clip(a, lo, hi))
         else:
             rate = self.accel_max if throttle >= 0.0 else self.brake_max
             self._v_cmd = float(np.clip(self._v_cmd + throttle * rate * self.dt,
