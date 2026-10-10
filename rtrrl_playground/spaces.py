@@ -35,12 +35,42 @@ class Discrete:
 
     @property
     def flat_dim(self) -> int:
-        return self.n
+        # one value per axis for a grid, not one per joint action: a one-hot
+        # over the product is 441 channels at 0.1 resolution and 1681 at 0.05
+        return len(self.nvec) if self.nvec else self.n
 
     def encode(self, a) -> np.ndarray:
-        v = np.zeros(self.n, dtype=np.float64)
+        """The previous action, as the network sees it.
+
+        For a flat space this is the usual one-hot. For a grid it is the
+        action's *value* on each axis in ``[-1, 1]``, which is what the one-hot
+        was standing in for anyway -- "the steering was hard left" rather than
+        "the action was number 17".
+
+        The one-hot does not survive the move to real resolution. It is
+        ``prod(nvec)`` wide, so at 21 x 21 it buried a ~20-dimensional
+        observation under 441 mostly-zero channels feeding untrained input
+        weights, and every fine-resolution arm fell back to the 8 m wall that
+        a policy with no usable observation hits. It also made the width a
+        function of the resolution, so a 21 x 21 arm and a 41 x 41 arm could
+        not be compared without comparing 441 inputs against 1681.
+
+        Two floats instead, whatever the resolution, and denser: the cell
+        reads the magnitude directly rather than having to learn one weight
+        per level.
+        """
+        if not self.nvec:
+            v = np.zeros(self.n, dtype=np.float64)
+            if a is not None:
+                v[int(a)] = 1.0
+            return v
+        v = np.zeros(len(self.nvec), dtype=np.float64)
         if a is not None:
-            v[int(a)] = 1.0
+            a = int(a)
+            for i in range(len(self.nvec) - 1, -1, -1):
+                k = self.nvec[i]
+                j, a = a % k, a // k
+                v[i] = 0.0 if k == 1 else -1.0 + 2.0 * j / (k - 1)
         return v
 
     def sample(self, rng: np.random.Generator):
