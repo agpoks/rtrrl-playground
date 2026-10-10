@@ -81,7 +81,7 @@ class ScuderiaLaneKeep(Env):
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
                  accel_max: float = 1.0, brake_max: float | None = None,
                  throttle_mode: str = "ramp", accel_cmd: float = 10.0,
-                 rolling_start: float = 1.0,
+                 rolling_start: float = 1.0, random_start: bool = False,
                  seed: int = 0, **make_kwargs):
         try:
             import jax
@@ -222,6 +222,9 @@ class ScuderiaLaneKeep(Env):
         self.max_steps = int(max_steps)
         self.start_pose = np.asarray(start_pose, dtype=float)
         self._key = jax.random.key(seed)
+        # its own stream, so turning random starts on does not shift the
+        # simulator's noise draws and change everything else too
+        self._rs_rng = np.random.default_rng(seed + 90210)
         # Which raw beams to keep. Evenly spaced across the full field of view,
         # so the nine numbers the agent sees mean the same thing they do in
         # envs/lanekeep.py: right to left, straight ahead in the middle.
@@ -374,6 +377,22 @@ class ScuderiaLaneKeep(Env):
         #: m/s the car is placed at on reset in accl mode, matching the speed
         #: the ramp-mode setpoint produces. 0.0 disables it.
         self.rolling_start = float(rolling_start)
+        #: Start each episode at a uniformly random point on the centreline
+        #: rather than always at the line.
+        #:
+        #: Always starting at the line means the policy only ever sees the
+        #: part of the circuit it can already reach, and on this one the
+        #: first corner is R = 1.04 m at s = 7 m and needs near-full lock.
+        #: A 21-level policy commands that by chance in 0 % of random
+        #: episodes against 3 % for a 3-level one, so it never gets past,
+        #: never sees a reward beyond 9 m, and has nothing to learn from --
+        #: every fine-resolution arm run so far has died there. The coarse
+        #: action set was not better at driving, it was better at stumbling
+        #: through the first corner.
+        #:
+        #: Training only. Evaluation keeps the fixed start, or "furthest
+        #: reached" stops meaning the same thing between arms.
+        self.random_start = bool(random_start)
         if self.throttle_mode == "accl":
             # The kernels read the mode off the ModelSpec, and `make()` writes
             # whatever it is handed: passing the *string* "accl" leaves it
@@ -688,12 +707,23 @@ class ScuderiaLaneKeep(Env):
         return float(self.half_width[k % len(self.half_width)]
                      if self.half_width.size > 1 else self.half_width[0])
 
+    def _sample_start(self):
+        """The pose to begin an episode at: the fixed one, or a random point
+        on the centreline facing along it."""
+        if not self.random_start or self.centreline is None:
+            return self.start_pose
+        c = np.asarray(self.centreline, float)[:, :2]
+        i = int(self._rs_rng.integers(len(c)))
+        nxt = c[(i + 1) % len(c)]
+        psi = float(np.arctan2(nxt[1] - c[i, 1], nxt[0] - c[i, 0]))
+        return np.array([c[i, 0], c[i, 1], psi], dtype=float)
+
     # -- Env ---------------------------------------------------------------
     def reset(self, seed: int | None = None) -> np.ndarray:
         jnp = self._jnp
         if seed is not None:
             self._key = self._jax.random.key(seed)
-        poses = jnp.asarray(self.start_pose).reshape(1, 3)
+        poses = jnp.asarray(self._sample_start()).reshape(1, 3)
         _obs, self._state = self.env.reset(self._split(), poses)
         self._t = 0
         # Ramp mode starts with a 1 m/s *setpoint*, so the PID pulls the car
