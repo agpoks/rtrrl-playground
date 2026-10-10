@@ -52,7 +52,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from rtrrl_playground.nets import make_cell  # noqa: E402
-from rtrrl_playground.nets.heads import CategoricalHead, GaussianHead, ValueHead  # noqa: E402
+from rtrrl_playground.nets.heads import (CategoricalHead,  # noqa: E402
+                                         FactoredCategoricalHead,
+                                         GaussianHead, ValueHead)
 from rtrrl_playground.spaces import Box, Discrete  # noqa: E402
 from rtrrl_playground.traces import accumulating_trace, dutch_trace  # noqa: E402
 
@@ -196,14 +198,26 @@ class RTRRL:
             # making the caller repeat it is a good way to get a silent
             # fallback to plain LiGRU.
             cell_kwargs.setdefault("n_obs", obs_dim)
-            cell_kwargs.setdefault("n_act", getattr(action_space, "n", None)
+            # the *encoded* width, which for a grid space is one value per
+            # axis rather than one per joint action -- `n` and `flat_dim`
+            # agreed until grids existed and now differ by 441 against 2
+            cell_kwargs.setdefault("n_act",
+                                   getattr(action_space, "flat_dim", None)
                                    if meta_inputs else None)
         self.cell = make_cell(cell, n_in, n_hidden, estimator=estimator,
                               rng=self.rng, **cell_kwargs)
         head_kw = dict(feedback=feedback, entropy_coef=entropy_coef,
                       sticky_prob=sticky_prob, rng=self.rng)
         if isinstance(action_space, Discrete):
-            self.actor = CategoricalHead(n_hidden, action_space.n, **head_kw)
+            # A grid says so through `nvec`, and then the actor is one softmax
+            # per axis rather than one over the product: 42 logits at 0.1
+            # resolution instead of 441, which is a score-function estimator
+            # separating 441 actions from one sample per 50 ms tick.
+            nvec = getattr(action_space, "nvec", None)
+            if nvec is not None and len(nvec) > 1:
+                self.actor = FactoredCategoricalHead(n_hidden, nvec, **head_kw)
+            else:
+                self.actor = CategoricalHead(n_hidden, action_space.n, **head_kw)
         elif isinstance(action_space, Box):
             self.actor = GaussianHead(n_hidden, action_space.dim,
                                       low=action_space.low, high=action_space.high, **head_kw)
@@ -445,8 +459,7 @@ class RTRRL:
         if isinstance(self.actor, GaussianHead):
             mu = self.actor.theta @ self.h + self.actor.bias
             return np.clip(mu, self.actor.low, self.actor.high)
-        pi = self.actor.act(self.h, self.rng)[1]
-        return int(np.argmax(pi))
+        return self.actor.greedy(self.h)
 
     def sample_action(self, obs: np.ndarray, prev_a=None, prev_r: float = 0.0):
         """One action from the *stochastic* policy, advancing the state.

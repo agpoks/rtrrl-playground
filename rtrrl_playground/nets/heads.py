@@ -109,6 +109,140 @@ class CategoricalHead:
     def entropy(self, pi: np.ndarray) -> float:
         return float(-(pi * np.log(np.clip(pi, 1e-12, None))).sum())
 
+    def greedy(self, h: np.ndarray) -> int:
+        """The argmax action. A method rather than the caller doing
+        ``argmax(pi)``, because for a factored policy ``pi`` is several
+        distributions laid end to end and its argmax is not an action."""
+        return int(np.argmax(self.theta @ h + self.bias))
+
+
+class FactoredCategoricalHead:
+    """One softmax per action axis, sampled independently from the same ``h``.
+
+    A grid action space costs a flat head the *product* of its axes. At the
+    0.1 resolution this project wants -- 21 steering levels and 21 throttle
+    levels -- that is a 441-way softmax fed one sample per 50 ms tick, and the
+    score-function estimator has to tell 441 actions apart from single draws.
+    Factoring it into 21 + 21 = 42 logits is not an approximation of that: if
+    the two axes are conditionally independent given ``h`` then
+
+        log pi(s, t | h) = log pi_s(s | h) + log pi_t(t | h)
+
+    exactly, so the gradient is the concatenation of the per-axis gradients and
+    the entropy is their sum. Independence given ``h`` is the real assumption,
+    and it is the right one for two separate actuators: the recurrent state
+    already carries whatever couples them.
+
+    Laid out as one stacked ``theta`` of ``(sum(nvec), n_hidden)`` so every
+    eligibility trace, clip and update in the agent works on it unchanged --
+    the axes are slices of one parameter block, not separate heads.
+
+    Actions are exchanged with the environment as the same flat index
+    ``spaces.action_grid`` uses, so filters, replay of old traces and the
+    one-hot encoding all keep working: axis ``i`` contributes
+    ``idx[i] * prod(nvec[i+1:])``, which for ``(n_steer, n_throttle)`` is
+    exactly ``a = i_steer * n_throttle + i_throttle``.
+    """
+
+    def __init__(self, n_hidden: int, nvec, feedback: str = "random",
+                 entropy_coef: float = 1e-5, sticky_prob: float = 0.0,
+                 rng: np.random.Generator | None = None):
+        rng = rng or np.random.default_rng(0)
+        self.nvec = tuple(int(x) for x in nvec)
+        if any(x < 1 for x in self.nvec):
+            raise ValueError(f"every axis needs >= 1 level, got {self.nvec}")
+        self.n = int(n_hidden)
+        # n_act is the stacked logit count, which is what the agent's traces
+        # are shaped by; `n_joint` is the size of the action set it indexes
+        self.n_act = int(sum(self.nvec))
+        self.n_joint = int(np.prod(self.nvec))
+        self.theta = np.zeros((self.n_act, self.n))
+        self.bias = np.zeros(self.n_act)
+        self.B = rng.normal(0, 1.0 / np.sqrt(self.n), (self.n_act, self.n))
+        self.feedback = feedback
+        self.entropy_coef = float(entropy_coef)
+        self.sticky_prob = float(sticky_prob)
+        self.prev_a: int | None = None
+        # where each axis starts in the stacked block
+        self.slices, o = [], 0
+        for k in self.nvec:
+            self.slices.append(slice(o, o + k))
+            o += k
+        # multipliers that turn per-axis indices into the flat grid index
+        self.strides = np.ones(len(self.nvec), dtype=int)
+        for i in range(len(self.nvec) - 2, -1, -1):
+            self.strides[i] = self.strides[i + 1] * self.nvec[i + 1]
+
+    @property
+    def n_params(self) -> int:
+        return self.theta.size + self.bias.size
+
+    def flat(self, idx) -> int:
+        return int(np.dot(np.asarray(idx, dtype=int), self.strides))
+
+    def unflat(self, a: int):
+        a, out = int(a), []
+        for st in self.strides:
+            out.append(a // st)
+            a = a % st
+        return out
+
+    def act(self, h: np.ndarray, rng: np.random.Generator):
+        z = self.theta @ h + self.bias
+        pi = np.empty_like(z)
+        idx = []
+        for sl in self.slices:
+            p = softmax(z[sl])
+            pi[sl] = p
+            # inverse-CDF for the same reason the flat head uses it
+            j = int(np.searchsorted(np.cumsum(p), rng.random()))
+            idx.append(min(j, sl.stop - sl.start - 1))
+        a = self.flat(idx)
+        if (self.sticky_prob > 0.0 and self.prev_a is not None
+                and rng.random() < self.sticky_prob):
+            a = self.prev_a
+        self.prev_a = a
+        return a, pi
+
+    def reset(self) -> None:
+        self.prev_a = None
+
+    def grads(self, h: np.ndarray, a: int, pi: np.ndarray):
+        """Per-axis ``onehot - pi`` stacked, which is the joint gradient.
+
+        Because the joint log-probability is the sum of the per-axis ones and
+        each axis's logits appear in only its own term, the cross blocks are
+        zero and no coupling term is missing here.
+        """
+        dz = -pi.copy()
+        idx = self.unflat(a)
+        for j, sl in zip(idx, self.slices):
+            dz[sl.start + j] += 1.0
+        if self.entropy_coef:
+            for sl in self.slices:
+                p = pi[sl]
+                logp = np.log(np.clip(p, 1e-12, None))
+                H = -float(p @ logp)
+                dz[sl] += self.entropy_coef * (-p * (logp + H))
+        back = self.B if self.feedback == "random" else self.theta
+        return np.outer(dz, h), dz, back.T @ dz
+
+    def apply(self, dtheta, dbias, lr: float) -> None:
+        self.theta += lr * dtheta
+        self.bias += lr * dbias
+
+    def entropy(self, pi: np.ndarray) -> float:
+        """Joint entropy, which for independent axes is the sum of theirs."""
+        tot = 0.0
+        for sl in self.slices:
+            p = pi[sl]
+            tot += float(-(p * np.log(np.clip(p, 1e-12, None))).sum())
+        return tot
+
+    def greedy(self, h: np.ndarray) -> int:
+        z = self.theta @ h + self.bias
+        return self.flat([int(np.argmax(z[sl])) for sl in self.slices])
+
 
 class GaussianHead:
     """Diagonal Gaussian policy: state-dependent mean, state-independent log-sigma.
