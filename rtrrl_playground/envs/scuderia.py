@@ -82,6 +82,8 @@ class ScuderiaLaneKeep(Env):
                  accel_max: float = 1.0, brake_max: float | None = None,
                  throttle_mode: str = "ramp", accel_cmd: float = 10.0,
                  rolling_start: float = 1.0, random_start: bool = False,
+                 respawn_at_crash: bool = False, respawn_backup: float = 3.0,
+                 respawn_crash_prob: float = 1.0,
                  seed: int = 0, **make_kwargs):
         try:
             import jax
@@ -393,6 +395,36 @@ class ScuderiaLaneKeep(Env):
         #: Training only. Evaluation keeps the fixed start, or "furthest
         #: reached" stops meaning the same thing between arms.
         self.random_start = bool(random_start)
+        #: Restart the next episode just before where the last one ended,
+        #: rather than at the line or at random.
+        #:
+        #: What a race weekend does. The car goes off at one corner, and the
+        #: next run is spent on that corner, not on the straight before it.
+        #: Resetting to the line instead spends almost all of a long episode
+        #: re-driving track the policy already handles, so the sector that
+        #: actually ends runs gets a few samples per episode and the rest
+        #: gets thousands -- and online RTRRL has no replay buffer to even
+        #: that out, so what the policy sees *is* what it learns from.
+        #:
+        #: The weights are never touched: this changes only where the next
+        #: episode begins, so the crash stays in the learning exactly as it
+        #: would otherwise.
+        self.respawn_at_crash = bool(respawn_at_crash)
+        #: metres back up the centreline from the crash, so the car arrives
+        #: at the corner with a run-up instead of being spawned mid-mistake
+        self.respawn_backup = float(respawn_backup)
+        #: how often to take the crash point rather than the ordinary start.
+        #:
+        #: 1.0 is the pure version -- always restart at the last failure --
+        #: and it can trap: measured on a random policy, six episodes in a row
+        #: respawned inside the same 157-162 m sector and the rest of the
+        #: circuit was never seen again. Practising the corner that ends runs
+        #: is the point; practising only that corner is not, because the
+        #: policy then forgets the track it could already drive and there is
+        #: no replay buffer here to remind it. Below 1.0 the remainder falls
+        #: through to `random_start` or the line.
+        self.respawn_crash_prob = float(respawn_crash_prob)
+        self._last_end = None
         if self.throttle_mode == "accl":
             # The kernels read the mode off the ModelSpec, and `make()` writes
             # whatever it is handed: passing the *string* "accl" leaves it
@@ -707,16 +739,34 @@ class ScuderiaLaneKeep(Env):
         return float(self.half_width[k % len(self.half_width)]
                      if self.half_width.size > 1 else self.half_width[0])
 
-    def _sample_start(self):
-        """The pose to begin an episode at: the fixed one, or a random point
-        on the centreline facing along it."""
-        if not self.random_start or self.centreline is None:
-            return self.start_pose
+    def _pose_at(self, i: int):
+        """Centreline point ``i``, facing along the track."""
         c = np.asarray(self.centreline, float)[:, :2]
-        i = int(self._rs_rng.integers(len(c)))
         nxt = c[(i + 1) % len(c)]
         psi = float(np.arctan2(nxt[1] - c[i, 1], nxt[0] - c[i, 0]))
         return np.array([c[i, 0], c[i, 1], psi], dtype=float)
+
+    def _sample_start(self):
+        """Where the next episode begins: the line, a random point, or just
+        before wherever the last one ended."""
+        if self.centreline is None:
+            return self.start_pose
+        c = np.asarray(self.centreline, float)[:, :2]
+        if (self.respawn_at_crash and self._last_end is not None
+                and self._rs_rng.random() < self.respawn_crash_prob):
+            # nearest centreline point to the crash, backed up along the
+            # track by `respawn_backup` metres so the corner is approached
+            # rather than started from inside
+            k = int(np.argmin(((c - np.asarray(self._last_end)) ** 2).sum(1)))
+            step = np.hypot(*np.diff(np.vstack([c, c[:1]]), axis=0).T)
+            back, j = 0.0, k
+            while back < self.respawn_backup:
+                j = (j - 1) % len(c)
+                back += float(step[j])
+            return self._pose_at(j)
+        if self.random_start:
+            return self._pose_at(int(self._rs_rng.integers(len(c))))
+        return self.start_pose
 
     # -- Env ---------------------------------------------------------------
     def reset(self, seed: int | None = None) -> np.ndarray:
@@ -780,6 +830,8 @@ class ScuderiaLaneKeep(Env):
             lateral, limit = float("nan"), float("nan")
         off_track = bool(self.half_width is not None and lateral > limit)
         if crashed or off_track:
+            # remembered for the next reset; see `respawn_at_crash`
+            self._last_end = (float(x[0]), float(x[1]))
             return (np.zeros(self.obs_dim), -1.0, True, False,
                     {"crashed": bool(crashed), "off_track": off_track,
                      "lateral": lateral})
