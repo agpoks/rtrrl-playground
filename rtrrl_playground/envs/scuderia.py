@@ -79,6 +79,7 @@ class ScuderiaLaneKeep(Env):
                  drive_features: bool = False, proprio: bool = False,
                  grip_feature: bool = False,
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
+                 reverse_penalty: float = 0.0,
                  accel_max: float = 1.0, brake_max: float | None = None,
                  throttle_mode: str = "ramp", accel_cmd: float = 10.0,
                  rolling_start: float = 1.0, random_start: bool = False,
@@ -188,6 +189,22 @@ class ScuderiaLaneKeep(Env):
         #: the tyres. Uses `a_lat = v r` against the *measured* peak friction
         #: rather than a generic constant.
         self.grip_penalty = float(grip_penalty)
+        #: Price a *reversal of the steered wheel*, per reversal, in the same
+        #: units as the progress reward.
+        #:
+        #: Measured on the 21x21 delta arm: the wheel changes direction 6.4
+        #: times a second and the driven path carries 3.3x the curvature of
+        #: the centreline, so more than half the tyre budget goes into the
+        #: weave rather than into the corner. A flat cost per reversal prices
+        #: that directly -- genuine corner-to-corner changes happen a few
+        #: times a lap and cost almost nothing, a 6 Hz limit cycle costs
+        #: 6 * reverse_penalty every second.
+        #:
+        #: Deliberately nothing here prices *negative acceleration*. On this
+        #: car that is negative motor current, which is the brake, and the
+        #: policy already under-uses it (1 % of steps).
+        self.reverse_penalty = float(reverse_penalty)
+        self._steer_flip = False
         self.grip_target = float(grip_target)
         self.grip_feature = bool(grip_feature)
         self._prev_vxy = None
@@ -608,12 +625,18 @@ class ScuderiaLaneKeep(Env):
             rate = self.accel_max if throttle >= 0.0 else self.brake_max
             self._v_cmd = float(np.clip(self._v_cmd + throttle * rate * self.dt,
                                         0.0, SPEED_MAX))
+        prev_steer = self._steer_cmd
         if self.steer_mode == "delta":
             self._steer_cmd = float(np.clip(
                 self._steer_cmd + steer * self.steer_rate * self.dt,
                 -STEER_MAX, STEER_MAX))
         else:
             self._steer_cmd = float(steer) * STEER_MAX
+        # the wheel crossed centre and is now pointed the other way. Read off
+        # the commanded angle rather than off the action, so it means the same
+        # in both steering modes: in delta mode the action is a rate, whose
+        # sign changes on every normal corner exit.
+        self._steer_flip = bool(prev_steer * self._steer_cmd < 0.0)
         return np.array([self._steer_cmd, self._v_cmd])
 
     def _pull(self, state):
@@ -815,6 +838,8 @@ class ScuderiaLaneKeep(Env):
             xx = self._x[0]
             usage = abs(float(xx[3]) * float(xx[5])) / (self.grip * 9.81)
             reward -= self.grip_penalty * max(0.0, usage - self.grip_target)
+        if self.reverse_penalty and self._steer_flip:
+            reward -= self.reverse_penalty
         self._t += 1
         x = self._x[0]
         self.history.append(dict(x=float(x[0]), y=float(x[1]), psi=float(x[4]),
