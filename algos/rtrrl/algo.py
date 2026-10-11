@@ -124,6 +124,8 @@ class RTRRL:
                  gamma: float = 0.99, lam_actor: float = 0.9, lam_critic: float = 0.9,
                  lam_rnn: float = 0.9, lr_actor: float = 1e-3, lr_critic: float = 0.03,
                  lr_rnn: float = 1e-5, entropy_coef: float = 0.03,
+                 smooth_t: float = 0.0, smooth_s: float = 0.0,
+                 smooth_sigma: float = 0.1, smooth_rnn: float = 1.0,
                  cell: str = "ctrnn", estimator: str = "rflo", feedback: str = "random",
                  critic_update: str = "true-online", critic_lr_mode: str = "normalized",
                  meta_inputs: bool = True, clip: float = 1.0,
@@ -206,6 +208,8 @@ class RTRRL:
                                    if meta_inputs else None)
         self.cell = make_cell(cell, n_in, n_hidden, estimator=estimator,
                               rng=self.rng, **cell_kwargs)
+        self.smooth_rnn = float(smooth_rnn)
+        self.smoothing = bool(smooth_t or smooth_s)
         head_kw = dict(feedback=feedback, entropy_coef=entropy_coef,
                       sticky_prob=sticky_prob, rng=self.rng)
         if isinstance(action_space, Discrete):
@@ -215,7 +219,9 @@ class RTRRL:
             # separating 441 actions from one sample per 50 ms tick.
             nvec = getattr(action_space, "nvec", None)
             if nvec is not None and len(nvec) > 1:
-                self.actor = FactoredCategoricalHead(n_hidden, nvec, **head_kw)
+                self.actor = FactoredCategoricalHead(
+                    n_hidden, nvec, smooth_t=smooth_t, smooth_s=smooth_s,
+                    smooth_sigma=smooth_sigma, **head_kw)
             else:
                 self.actor = CategoricalHead(n_hidden, action_space.n, **head_kw)
         elif isinstance(action_space, Box):
@@ -306,6 +312,19 @@ class RTRRL:
         # matters here more than anywhere else in the file.
         dW = self.cell.grad(g)
 
+        # --- 2b. CAPS, if it is on -----------------------------------------
+        # A regulariser, not a return: it is *not* multiplied by delta and
+        # not carried in an eligibility trace, because "do not swing the
+        # wheel" is true at this tick whatever the TD error turns out to be.
+        # It does go through the trigger, so an event-driven run still only
+        # writes weights when it fires. cell.grad has to be called here, on
+        # the influence that still belongs to h_t.
+        ds_theta = ds_z = ds_rnn = None
+        if self.smoothing:
+            ds_theta, ds_z, ds_g = self.actor.smooth_grads(h_t, self.cache,
+                                                           self.rng)
+            ds_rnn = self.cell.grad(ds_g)
+
         # --- 3. now advance the recurrent state (and its influence) ----------
         self.h = self.cell.step(self._input(obs, self.a, reward))
         v_next = 0.0 if terminated else self.critic.value(self.h)
@@ -346,6 +365,12 @@ class RTRRL:
         d_b = _clip(step_a * self.e_actor_b, self.clip)
         d_s = None if dlog_sigma is None else _clip(step_a * dlog_sigma, self.clip)
         d_rnn = _clip(delta * self.e_rnn, self.clip)
+        if ds_theta is not None:
+            # descent on the penalty, at the actor's own step size
+            d_a -= _clip(self.lr_actor * ds_theta, self.clip)
+            d_b -= _clip(self.lr_actor * ds_z, self.clip)
+            if self.smooth_rnn:
+                d_rnn -= _clip(self.smooth_rnn * ds_rnn, self.clip)
 
         if self.trigger == "evidence" and self.spike_threshold <= 0.0:
             self.n_updates += 1

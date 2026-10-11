@@ -146,6 +146,8 @@ class FactoredCategoricalHead:
 
     def __init__(self, n_hidden: int, nvec, feedback: str = "random",
                  entropy_coef: float = 1e-5, sticky_prob: float = 0.0,
+                 smooth_t: float = 0.0, smooth_s: float = 0.0,
+                 smooth_sigma: float = 0.1,
                  rng: np.random.Generator | None = None):
         rng = rng or np.random.default_rng(0)
         self.nvec = tuple(int(x) for x in nvec)
@@ -163,6 +165,17 @@ class FactoredCategoricalHead:
         self.entropy_coef = float(entropy_coef)
         self.sticky_prob = float(sticky_prob)
         self.prev_a: int | None = None
+        # CAPS (Mysore et al. 2021) adapted to an ordinal categorical head:
+        # the quantity an actuator sees is the *commanded level*, so the
+        # penalty is on the expected level moving, not on the distribution
+        # changing in some abstract sense. Two 2-level distributions that
+        # swap all their mass have a large KL and the same mean; two that
+        # shift one level have a small KL and a mean that moved. It is the
+        # second that the tyre feels.
+        self.smooth_t = float(smooth_t)
+        self.smooth_s = float(smooth_s)
+        self.smooth_sigma = float(smooth_sigma)
+        self.prev_mean: np.ndarray | None = None
         # where each axis starts in the stacked block
         self.slices, o = [], 0
         for k in self.nvec:
@@ -172,6 +185,9 @@ class FactoredCategoricalHead:
         self.strides = np.ones(len(self.nvec), dtype=int)
         for i in range(len(self.nvec) - 2, -1, -1):
             self.strides[i] = self.strides[i + 1] * self.nvec[i + 1]
+        # the command each level stands for, in the -1..1 the env decodes
+        self.levels = [np.linspace(-1.0, 1.0, k) if k > 1 else np.zeros(1)
+                       for k in self.nvec]
 
     @property
     def n_params(self) -> int:
@@ -206,6 +222,63 @@ class FactoredCategoricalHead:
 
     def reset(self) -> None:
         self.prev_a = None
+        self.prev_mean = None   # the last episode's command is not this one's
+
+    def means(self, pi: np.ndarray) -> np.ndarray:
+        """Expected command per axis -- what the actuator is being asked for."""
+        return np.array([float(pi[sl] @ u)
+                         for sl, u in zip(self.slices, self.levels)])
+
+    def smooth_grads(self, h: np.ndarray, pi: np.ndarray,
+                     rng: np.random.Generator | None = None):
+        """Gradient of the CAPS penalty, to be *subtracted* by the caller.
+
+        Temporal term: the expected command must not move much between two
+        ticks 50 ms apart. Spatial term: it must not move much for a small
+        change of the recurrent state either -- which is the one that matters
+        here, because a policy whose output swings on a small change of ``h``
+        is a policy that will ring at whatever frequency ``h`` ripples at.
+        CAPS perturbs the observation; perturbing ``h`` is the same condition
+        one layer in, and costs a head evaluation rather than a cell step.
+
+        Returns ``(dtheta, dz, g_back)`` with the same shapes ``grads`` uses,
+        so the agent can fold them into the update it already builds. The
+        side effect is remembering this tick's mean for the next one.
+        """
+        dz = np.zeros_like(pi)
+        m = self.means(pi)
+        # d(mean_i)/d(z in axis i) = p * (u - mean_i)
+        dm = [pi[sl] * (u - m[i])
+              for i, (sl, u) in enumerate(zip(self.slices, self.levels))]
+
+        if self.smooth_t and self.prev_mean is not None:
+            diff = m - self.prev_mean
+            for i, sl in enumerate(self.slices):
+                dz[sl] += 2.0 * self.smooth_t * diff[i] * dm[i]
+        self.prev_mean = m
+
+        dtheta = np.outer(dz, h)
+        if self.smooth_s and rng is not None:
+            hb = h + self.smooth_sigma * rng.standard_normal(h.shape)
+            zb = self.theta @ hb + self.bias
+            pib = np.empty_like(zb)
+            for sl in self.slices:
+                pib[sl] = softmax(zb[sl])
+            mb = self.means(pib)
+            diff = m - mb
+            dzb = np.zeros_like(pi)
+            for i, (sl, u) in enumerate(zip(self.slices, self.levels)):
+                dz[sl] += 2.0 * self.smooth_s * diff[i] * dm[i]
+                dzb[sl] -= 2.0 * self.smooth_s * diff[i] * pib[sl] * (u - mb[i])
+            # the perturbed branch moves theta and the bias, but hb is not a
+            # state the cell was ever in, so it must not be fed back into it
+            dtheta = np.outer(dz, h) + np.outer(dzb, hb)
+            dz_cell, dz = dz, dz + dzb
+        else:
+            dz_cell = dz
+
+        back = self.B if self.feedback == "random" else self.theta
+        return dtheta, dz, back.T @ dz_cell
 
     def grads(self, h: np.ndarray, a: int, pi: np.ndarray):
         """Per-axis ``onehot - pi`` stacked, which is the joint gradient.
