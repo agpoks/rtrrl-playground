@@ -55,7 +55,7 @@ import numpy as np
 from rtrrl_playground.envs.track import (HEADING_SCALE, Track, TRACKS,
                                          lookahead_features)
 from rtrrl_playground.envs.vehicle import VehicleParams
-from rtrrl_playground.spaces import (N_STEER, N_THROTTLE, Box, Discrete,
+from rtrrl_playground.spaces import (N_ACCEL, N_STEER, Box, Discrete,
                                      Env, action_grid)
 
 # --- 1:10 RC scale, roughly a Traxxas Slash on a club track -----------------
@@ -108,7 +108,8 @@ class LaneKeep(Env):
                  grip_range=(0.6, 1.4), vehicle: VehicleParams | None = None,
                  n_beams: int | None = None, fov_deg: float | None = None,
                  dt: float = 0.05, max_steps: int = 600,
-                 n_steer: int = N_STEER, n_throttle: int = N_THROTTLE,
+                 n_steer: int = N_STEER, n_accel: int = N_ACCEL,
+                 n_throttle: int | None = None,
                  lookahead=None, aim_feature: bool = False,
                  steer_mode: str = "absolute", steer_rate: float = 2.0,
                  drive_features: bool = False, proprio: bool = False,
@@ -172,13 +173,23 @@ class LaneKeep(Env):
                         + int(self.aim_feature)
                         + 3 * int(self.drive_features)
                         + 5 * int(self.proprio))
-        # A flat softmax over steer x throttle rather than two heads: one
+        # A flat softmax over steer x accel rather than two heads: one
         # categorical distribution is one gradient to derive. The *resolution*
-        # is `n_steer` x `n_throttle`, defaulting to the 3 x 3 every result
+        # is `n_steer` x `n_accel`, defaulting to the 3 x 3 every result
         # here was measured at -- see `spaces.action_grid` for why three is not
         # free, and for why this grid is defined in exactly one place now.
-        self.action_grid = action_grid(n_steer, n_throttle)
-        self.n_steer, self.n_throttle = int(n_steer), int(n_throttle)
+        # deprecated spelling, accepted so a run already in flight keeps
+        # working; the axis is an acceleration, the car has no throttle
+        if n_throttle is not None:
+            n_accel = n_throttle
+        self.action_grid = action_grid(n_steer, n_accel)
+        self.n_steer, self.n_accel = int(n_steer), int(n_accel)
+        # Deliberately no `nvec` here, unlike the Scuderia adapter. Passing
+        # it switches the previous-action encoding from a one-hot to two
+        # ordinal values, which is the right thing at 21x21 and a silent
+        # change to every lanekeep result measured at 3x3. The two envs
+        # therefore disagree until someone re-measures the lanekeep
+        # baselines on purpose.
         self.action_space = (Discrete(len(self.action_grid))
                              if action_mode == "discrete" else Box(2))
         self._rng = np.random.default_rng(seed)

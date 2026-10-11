@@ -144,7 +144,14 @@ class Env:
 #: about the centreline. That weave is 67 % of ``curvy``'s half-width and 93 %
 #: of master_cup's -- which is why the same policy laps one and cannot stay on
 #: the other.
-N_STEER, N_THROTTLE = 3, 3
+N_STEER, N_ACCEL = 3, 3
+
+#: Deprecated spelling of :data:`N_ACCEL`. The second axis is a longitudinal
+#: *acceleration* command, not a throttle: the car is current-controlled, and
+#: in ``ctrl_mode=1`` the level is multiplied by ``accel_cmd`` to give m/s^2
+#: (in ``ctrl_mode=2``, amps). Kept only so callers outside this package keep
+#: importing; nothing here uses it.
+N_THROTTLE = N_ACCEL
 
 
 def action_levels(n: int) -> np.ndarray:
@@ -156,8 +163,12 @@ def action_levels(n: int) -> np.ndarray:
     return np.linspace(-1.0, 1.0, n)
 
 
-def action_grid(n_steer: int = N_STEER, n_throttle: int = N_THROTTLE) -> np.ndarray:
-    """``(n_steer * n_throttle, 2)`` of ``(steer, throttle)`` in ``[-1, 1]``.
+def action_grid(n_steer: int = N_STEER, n_accel: int | None = None,
+                n_throttle: int | None = None) -> np.ndarray:
+    """``(n_steer * n_accel, 2)`` of ``(steer, accel)`` in ``[-1, 1]``.
+
+    ``n_throttle`` is the deprecated name for ``n_accel`` and is accepted so
+    that pickled call sites from a run already in flight keep working.
 
     Row ``a`` is the action the flat categorical head calls ``a``, so this is
     the single definition of what a discrete action *means*. It used to be
@@ -167,7 +178,9 @@ def action_grid(n_steer: int = N_STEER, n_throttle: int = N_THROTTLE) -> np.ndar
     another, silently. At the default resolution this reproduces that formula
     exactly, so no measured result moves.
     """
+    if n_accel is None:
+        n_accel = N_ACCEL if n_throttle is None else n_throttle
     st = action_levels(n_steer)
-    th = action_levels(n_throttle)
-    return np.array([[st[a // n_throttle], th[a % n_throttle]]
-                     for a in range(n_steer * n_throttle)], dtype=np.float64)
+    ac = action_levels(n_accel)
+    return np.array([[st[a // n_accel], ac[a % n_accel]]
+                     for a in range(n_steer * n_accel)], dtype=np.float64)

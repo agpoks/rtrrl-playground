@@ -43,7 +43,7 @@ from __future__ import annotations
 import numpy as np
 
 from rtrrl_playground.envs.vehicle import VehicleParams
-from rtrrl_playground.spaces import (N_STEER, N_THROTTLE, Box, Discrete,
+from rtrrl_playground.spaces import (N_ACCEL, N_STEER, Box, Discrete,
                                      Env, action_grid)
 
 STEER_MAX = 0.4  # rad, the steering-angle setpoint the simulator's PID takes
@@ -73,7 +73,7 @@ class ScuderiaLaneKeep(Env):
                  max_steps: int = 2000, control_repeat: int = 5,
                  start_pose=(0.0, 0.0, 0.0), grip: float | None = None,
                  track_half_width: float | None = None,
-                 n_steer: int = N_STEER, n_throttle: int = N_THROTTLE,
+                 n_steer: int = N_STEER, n_accel: int = N_ACCEL,
                  lookahead=None, aim_feature: bool = False,
                  steer_mode: str = "absolute", steer_rate: float = 2.0,
                  drive_features: bool = False, proprio: bool = False,
@@ -81,7 +81,8 @@ class ScuderiaLaneKeep(Env):
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
                  reverse_penalty: float = 0.0,
                  accel_max: float = 1.0, brake_max: float | None = None,
-                 throttle_mode: str = "ramp", accel_cmd: float = 10.0,
+                 accel_mode: str = "ramp", accel_cmd: float = 10.0,
+                 n_throttle: int | None = None, throttle_mode: str | None = None,
                  rolling_start: float = 1.0, random_start: bool = False,
                  respawn_at_crash: bool = False, respawn_backup: float = 3.0,
                  respawn_crash_prob: float = 1.0,
@@ -111,11 +112,21 @@ class ScuderiaLaneKeep(Env):
         # control was speed control being handed +/-10 as a *setpoint* -- the
         # PID saturated and the car appeared to brake at a_max, which is a
         # flattering measurement of the wrong thing.
-        if throttle_mode not in ("ramp", "accl"):
+        # Deprecated spellings, accepted and translated. The car has no
+        # throttle -- the axis is a longitudinal acceleration (m/s^2 in
+        # ctrl_mode=1, amps in ctrl_mode=2) -- so the names went, but a run
+        # already in flight has `n_throttle=`/`throttle_mode=` pickled into
+        # its worker queue and must not start failing halfway through.
+        _dep_n_throttle, _dep_throttle_mode = n_throttle, throttle_mode
+        if _dep_n_throttle is not None:
+            n_accel = _dep_n_throttle
+        if _dep_throttle_mode is not None:
+            accel_mode = _dep_throttle_mode
+        if accel_mode not in ("ramp", "accl"):
             raise ValueError(
-                f"throttle_mode must be ramp or accl, got {throttle_mode!r}")
-        self.throttle_mode = str(throttle_mode)
-        if self.throttle_mode == "accl":
+                f"accel_mode must be ramp or accl, got {accel_mode!r}")
+        self.accel_mode = str(accel_mode)
+        if self.accel_mode == "accl":
             # the int, not the name: `make` writes whatever it is handed onto
             # the ModelSpec without passing it through `ctrl_code_from_name`,
             # so the string "accl" never equals CTRL_ACCL and is silently
@@ -214,7 +225,7 @@ class ScuderiaLaneKeep(Env):
         # moves it at `steer_rate` rad/s, so the command is a rate and the
         # angle is the integral of the policy's choices.
         #
-        # The case for "delta" is that the throttle in this adapter has always
+        # The case for "delta" is that the accel axis in this adapter has always
         # worked that way -- `_v_cmd` ramps rather than being placed -- so
         # absolute steering was the inconsistent half. It matters because with
         # three absolute levels there is no steering angle between 0 and 22.9
@@ -233,10 +244,10 @@ class ScuderiaLaneKeep(Env):
                         + int(self.grip_feature))
         # one definition of what a discrete action means, shared with the
         # filters -- see `spaces.action_grid`
-        self.action_grid = action_grid(n_steer, n_throttle)
-        self.n_steer, self.n_throttle = int(n_steer), int(n_throttle)
+        self.action_grid = action_grid(n_steer, n_accel)
+        self.n_steer, self.n_accel = int(n_steer), int(n_accel)
         self.action_space = (
-            Discrete(len(self.action_grid), nvec=(int(n_steer), int(n_throttle)))
+            Discrete(len(self.action_grid), nvec=(int(n_steer), int(n_accel)))
             if action_mode == "discrete" else Box(2))
         self.max_steps = int(max_steps)
         self.start_pose = np.asarray(start_pose, dtype=float)
@@ -341,9 +352,9 @@ class ScuderiaLaneKeep(Env):
         # neither is cosmetic:
         #
         # ``accel_max`` is 4.0 m/s^2 there and **1.0 m/s^2 here**, measured:
-        # full throttle from rest gives 1.13 m/s^2 and full brake from 4 m/s
+        # full acceleration from rest gives 1.13 m/s^2 and full brake from 4 m/s
         # gives 1.00, because ``_decode`` ramps a speed *setpoint* at
-        # ``throttle * 1.0 * dt`` and the simulator's PID tracks it. A filter
+        # ``accel * 1.0 * dt`` and the simulator's PID tracks it. A filter
         # left at 4.0 believes it can shed speed four times faster than the car
         # can, certifies a backup plan that stops in a quarter of the distance,
         # and produces exactly the "crashes *through* the filter" that
@@ -372,7 +383,8 @@ class ScuderiaLaneKeep(Env):
         #: measured before this existed still reproduces.
         self.accel_max = float(accel_max)
         self.brake_max = float(accel_max if brake_max is None else brake_max)
-        #: What the throttle axis *means*.
+        #: What the second action axis *means*. The car has no throttle:
+        #: it is current-controlled, so the quantity is an acceleration.
         #:
         #: ``"ramp"`` is the ROS2 Ackermann convention the simulator defaults
         #: to: the action nudges a speed setpoint and a PID chases it. It is
@@ -442,7 +454,7 @@ class ScuderiaLaneKeep(Env):
         #: through to `random_start` or the line.
         self.respawn_crash_prob = float(respawn_crash_prob)
         self._last_end = None
-        if self.throttle_mode == "accl":
+        if self.accel_mode == "accl":
             # The kernels read the mode off the ModelSpec, and `make()` writes
             # whatever it is handed: passing the *string* "accl" leaves it
             # uncoverted and the comparison against CTRL_ACCL silently fails,
@@ -593,16 +605,16 @@ class ScuderiaLaneKeep(Env):
     def _decode(self, action) -> np.ndarray:
         """Action -> ``[steering angle, speed setpoint]``, the simulator's input."""
         if self.action_mode == "discrete":
-            steer, throttle = self.action_grid[int(action)]
+            steer, accel = self.action_grid[int(action)]
         else:
             a = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
-            steer, throttle = float(a[0]), float(a[1])
-        if self.throttle_mode == "accl":
+            steer, accel = float(a[0]), float(a[1])
+        if self.accel_mode == "accl":
             # a direct acceleration command; no integration, and deliberately
             # no clip to SPEED_MAX -- that clip is a property of a *setpoint*,
             # and applying it here would cap the command at 4 (m/s^2 here,
             # amps in current mode) and quietly make the car slower
-            a = float(throttle) * self.accel_cmd
+            a = float(accel) * self.accel_cmd
             # Braking stops the car; it does not reverse it. Ramp mode clipped
             # the setpoint to [0, SPEED_MAX], so reverse was unreachable there
             # and the two modes would not otherwise be comparable -- measured,
@@ -622,8 +634,8 @@ class ScuderiaLaneKeep(Env):
             lo = -v_now / max(self.dt, 1e-6)
             self._v_cmd = float(np.clip(a, lo, hi))
         else:
-            rate = self.accel_max if throttle >= 0.0 else self.brake_max
-            self._v_cmd = float(np.clip(self._v_cmd + throttle * rate * self.dt,
+            rate = self.accel_max if accel >= 0.0 else self.brake_max
+            self._v_cmd = float(np.clip(self._v_cmd + accel * rate * self.dt,
                                         0.0, SPEED_MAX))
         prev_steer = self._steer_cmd
         if self.steer_mode == "delta":
@@ -808,8 +820,8 @@ class ScuderiaLaneKeep(Env):
         # would have been scored on an exploration artefact rather than on
         # control authority. Both modes therefore get the same rolling start,
         # one as a setpoint and one as an actual speed.
-        self._v_cmd = 0.0 if self.throttle_mode == "accl" else 1.0
-        if self.throttle_mode == "accl" and self.rolling_start:
+        self._v_cmd = 0.0 if self.accel_mode == "accl" else 1.0
+        if self.accel_mode == "accl" and self.rolling_start:
             self._state = self._state.replace(
                 x=self._state.x.at[0, 3].set(float(self.rolling_start)))
         self._steer_cmd = 0.0
