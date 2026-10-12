@@ -845,13 +845,20 @@ class ScuderiaLaneKeep(Env):
             _o, self._state, _r, _d, _i = self._step_env(key, self._state, u)
         self._x, self._scans = self._pull(self._state)
         crashed = bool(np.asarray(self._state.collisions)[0])
-        reward = self._reward(self._x, x_prev)
+        # Kept as three named parts, not one float. The scalar is all the
+        # agent ever sees, but a figure of "the reward" that cannot say how
+        # much of it was progress and how much was a penalty cannot explain a
+        # policy that drives slowly to avoid a cost -- which is the failure
+        # these penalties are most likely to cause.
+        r_progress = self._reward(self._x, x_prev)
+        r_grip = 0.0
         if self.grip_penalty:
             xx = self._x[0]
             usage = abs(float(xx[3]) * float(xx[5])) / (self.grip * 9.81)
-            reward -= self.grip_penalty * max(0.0, usage - self.grip_target)
-        if self.reverse_penalty and self._steer_flip:
-            reward -= self.reverse_penalty
+            r_grip = -self.grip_penalty * max(0.0, usage - self.grip_target)
+        r_reverse = (-self.reverse_penalty
+                     if self.reverse_penalty and self._steer_flip else 0.0)
+        reward = r_progress + r_grip + r_reverse
         self._t += 1
         x = self._x[0]
         self.history.append(dict(x=float(x[0]), y=float(x[1]), psi=float(x[4]),
@@ -871,11 +878,14 @@ class ScuderiaLaneKeep(Env):
             self._last_end = (float(x[0]), float(x[1]))
             return (np.zeros(self.obs_dim), -1.0, True, False,
                     {"crashed": bool(crashed), "off_track": off_track,
-                     "lateral": lateral})
+                     "lateral": lateral, "r_progress": 0.0, "r_grip": 0.0,
+                     "r_reverse": 0.0, "r_crash": -1.0})
         truncated = self._t >= self.max_steps
         return (self._obs_from(self._x, self._scans), float(reward), False, truncated,
                 {"crashed": False, "off_track": False, "lateral": lateral,
-                 "v": float(x[3])})
+                 "v": float(x[3]), "r_progress": float(r_progress),
+                 "r_grip": float(r_grip), "r_reverse": float(r_reverse),
+                 "r_crash": 0.0})
 
     # -- pictures ----------------------------------------------------------
     def render_rollout(self, history=None, path: str = "rollout.png", title: str = ""):
