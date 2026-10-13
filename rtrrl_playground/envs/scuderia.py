@@ -80,6 +80,8 @@ class ScuderiaLaneKeep(Env):
                  grip_feature: bool = False,
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
                  reverse_penalty: float = 0.0,
+                 accel_rate: float | None = None,
+                 accel_jerk_penalty: float = 0.0,
                  accel_max: float = 1.0, brake_max: float | None = None,
                  accel_mode: str = "ramp", accel_cmd: float = 10.0,
                  n_throttle: int | None = None, throttle_mode: str | None = None,
@@ -216,6 +218,22 @@ class ScuderiaLaneKeep(Env):
         #: policy already under-uses it (1 % of steps).
         self.reverse_penalty = float(reverse_penalty)
         self._steer_flip = False
+        #: The steering axis has had a rate limit (`steer_rate`) and a price
+        #: on reversing (`reverse_penalty`) since the smoothing work began.
+        #: The acceleration axis had neither, so the commanded acceleration
+        #: could jump the full +10 to -10 m/s^2 in one 50 ms tick, which no
+        #: ESC can follow and which the recorded traces show it doing. These
+        #: are the two matching mechanisms.
+        #:
+        #: `accel_rate` is a jerk limit in m/s^3 on the *command* (amps per
+        #: second over 0.106 in current mode). None leaves the axis as it
+        #: was, so every earlier result still reproduces.
+        self.accel_rate = None if accel_rate is None else float(accel_rate)
+        #: charged per step on |change in command| as a fraction of full
+        #: scale, so it means the same at any accel_cmd
+        self.accel_jerk_penalty = float(accel_jerk_penalty)
+        self._accel_cmd = 0.0
+        self._accel_jerk = 0.0
         self.grip_target = float(grip_target)
         self.grip_feature = bool(grip_feature)
         self._prev_vxy = None
@@ -615,6 +633,14 @@ class ScuderiaLaneKeep(Env):
             # and applying it here would cap the command at 4 (m/s^2 here,
             # amps in current mode) and quietly make the car slower
             a = float(accel) * self.accel_cmd
+            if self.accel_rate is not None:
+                step = self.accel_rate * self.dt
+                a = float(np.clip(a, self._accel_cmd - step,
+                                  self._accel_cmd + step))
+            # on full scale, so the penalty is independent of accel_cmd
+            self._accel_jerk = (abs(a - self._accel_cmd)
+                                / max(self.accel_cmd, 1e-9))
+            self._accel_cmd = a
             # Braking stops the car; it does not reverse it. Ramp mode clipped
             # the setpoint to [0, SPEED_MAX], so reverse was unreachable there
             # and the two modes would not otherwise be comparable -- measured,
@@ -825,6 +851,8 @@ class ScuderiaLaneKeep(Env):
             self._state = self._state.replace(
                 x=self._state.x.at[0, 3].set(float(self.rolling_start)))
         self._steer_cmd = 0.0
+        self._accel_cmd = 0.0
+        self._accel_jerk = 0.0
         self._prev_vxy = None
         self._prev_s = None
         self.history = []
@@ -858,7 +886,8 @@ class ScuderiaLaneKeep(Env):
             r_grip = -self.grip_penalty * max(0.0, usage - self.grip_target)
         r_reverse = (-self.reverse_penalty
                      if self.reverse_penalty and self._steer_flip else 0.0)
-        reward = r_progress + r_grip + r_reverse
+        r_ajerk = -self.accel_jerk_penalty * self._accel_jerk
+        reward = r_progress + r_grip + r_reverse + r_ajerk
         self._t += 1
         x = self._x[0]
         self.history.append(dict(x=float(x[0]), y=float(x[1]), psi=float(x[4]),
@@ -879,13 +908,13 @@ class ScuderiaLaneKeep(Env):
             return (np.zeros(self.obs_dim), -1.0, True, False,
                     {"crashed": bool(crashed), "off_track": off_track,
                      "lateral": lateral, "r_progress": 0.0, "r_grip": 0.0,
-                     "r_reverse": 0.0, "r_crash": -1.0})
+                     "r_reverse": 0.0, "r_accel_jerk": 0.0, "r_crash": -1.0})
         truncated = self._t >= self.max_steps
         return (self._obs_from(self._x, self._scans), float(reward), False, truncated,
                 {"crashed": False, "off_track": False, "lateral": lateral,
                  "v": float(x[3]), "r_progress": float(r_progress),
                  "r_grip": float(r_grip), "r_reverse": float(r_reverse),
-                 "r_crash": 0.0})
+                 "r_accel_jerk": float(r_ajerk), "r_crash": 0.0})
 
     # -- pictures ----------------------------------------------------------
     def render_rollout(self, history=None, path: str = "rollout.png", title: str = ""):
