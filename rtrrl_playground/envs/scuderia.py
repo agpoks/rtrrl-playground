@@ -77,7 +77,7 @@ class ScuderiaLaneKeep(Env):
                  lookahead=None, aim_feature: bool = False,
                  steer_mode: str = "absolute", steer_rate: float = 2.0,
                  drive_features: bool = False, proprio: bool = False,
-                 grip_feature: bool = False,
+                 grip_feature: bool = False, steer_feature: bool = False,
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
                  reverse_penalty: float = 0.0,
                  accel_rate: float | None = None,
@@ -171,6 +171,22 @@ class ScuderiaLaneKeep(Env):
         #: cell the same raw signals the EKF integrates lets it form its own
         #: estimate, which is what the memory is for and what transfers.
         self.proprio = bool(proprio)
+        #: The wheel angle the policy is currently commanding, as a fraction
+        #: of lock. In `delta` mode the action is a *rate*: the adapter keeps
+        #: `_steer_cmd` and integrates `action * steer_rate * dt` into it. That
+        #: setpoint is a state of the loop, and without this feature it is a
+        #: *hidden* one -- the policy drives an integrator it cannot see, and
+        #: "hold the wheel where it is" is then not a thing it can express,
+        #: because the zero-rate action means "keep whatever angle I am at"
+        #: and it does not know what that is. Measured on the straights, where
+        #: the lidar error signal is smallest and so the sign of the feedback
+        #: flips fastest, the wheel crosses centre 2.3 times a second.
+        #:
+        #: It is free on the car: this is the number the servo was last told,
+        #: not a measurement, so there is nothing to estimate and nothing to
+        #: transfer. In `absolute` mode it is the previous action, which the
+        #: cell already receives as a meta input, and so adds nothing.
+        self.steer_feature = bool(steer_feature)
         #: How much of the tyres' friction budget is in use right now, as a
         #: fraction: sqrt(ax^2 + ay^2) / (mu g). The project has a fitted tyre
         #: model -- `rc10_default.yaml` records mu = 1.10 measured from
@@ -259,7 +275,8 @@ class ScuderiaLaneKeep(Env):
                         + int(self.aim_feature)
                         + 3 * int(self.drive_features)
                         + 5 * int(self.proprio)
-                        + int(self.grip_feature))
+                        + int(self.grip_feature)
+                        + int(self.steer_feature))
         # one definition of what a discrete action means, shared with the
         # filters -- see `spaces.action_grid`
         self.action_grid = action_grid(n_steer, n_accel)
@@ -772,6 +789,14 @@ class ScuderiaLaneKeep(Env):
             parts.append(lookahead_features(self.centreline, float(x[0, 0]),
                                             float(x[0, 1]), float(x[0, 4]),
                                             self.lookahead))
+        if self.steer_feature:
+            # Last, so that turning it on does not move any existing feature:
+            # a saved policy, a figure's axis labels and the feature indices
+            # written down elsewhere all keep meaning what they meant. The
+            # *commanded* setpoint, not `x[0, 2]`, which is where the servo
+            # has got to -- the command is what the action adds to and the
+            # only one of the two the car knows without a sensor.
+            parts.append(np.array([self._steer_cmd / STEER_MAX]))
         return np.concatenate(parts) if len(parts) > 1 else parts[0]
 
     def _reward(self, x: np.ndarray, x_prev: np.ndarray) -> float:
