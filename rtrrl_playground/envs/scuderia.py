@@ -541,6 +541,25 @@ class ScuderiaLaneKeep(Env):
         return self._st("delta")
 
     @property
+    def accel_command(self) -> float:
+        """The longitudinal command actually issued this step, m/s^2.
+
+        The action is a *request*: in ``accl`` mode it is scaled by
+        ``accel_cmd`` and then, if ``accel_rate`` is set, clipped to one
+        jerk-limited step from the last command. Reading the action instead of
+        this is reading the request, and with a rate limit in force the two
+        are different signals -- which is the same mistake that made a
+        steering *rate* get plotted as a steering angle. The steering axis has
+        ``delta`` for this; the acceleration axis had nothing.
+        """
+        return self._accel_cmd
+
+    @property
+    def speed_setpoint(self) -> float:
+        """The speed the simulator's PID is tracking, m/s."""
+        return self._v_cmd
+
+    @property
     def v(self) -> float:
         """Velocity *magnitude*, m/s. ``vx`` is its longitudinal component."""
         return self._st("v")
