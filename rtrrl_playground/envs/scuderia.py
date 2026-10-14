@@ -80,6 +80,7 @@ class ScuderiaLaneKeep(Env):
                  grip_feature: bool = False, steer_feature: bool = False,
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
                  reverse_penalty: float = 0.0,
+                 steer_move_penalty: float = 0.0,
                  accel_rate: float | None = None,
                  accel_jerk_penalty: float = 0.0,
                  accel_max: float = 1.0, brake_max: float | None = None,
@@ -233,6 +234,21 @@ class ScuderiaLaneKeep(Env):
         #: car that is negative motor current, which is the brake, and the
         #: policy already under-uses it (1 % of steps).
         self.reverse_penalty = float(reverse_penalty)
+        #: A price on the wheel *moving*, paid per tick as
+        #: `steer_move_penalty * |action|`. In delta mode the action is the
+        #: rate, so this is a price per degree of wheel travel: holding an
+        #: angle is free, and reaching one costs in proportion to how far the
+        #: wheel has to go. That is the shape the other two smoothing costs
+        #: do not have. `reverse_penalty` only charges once the wheel has
+        #: already swung all the way across centre, and CAPS (`smooth_t`)
+        #: charges for the rate *changing*, so holding a constant full rate
+        #: -- which drives the wheel into the stop and keeps it there -- is
+        #: free under both. Measured on the straights, the wheel travels
+        #: about 2 rad/s for no net angle at all, and neither cost sees it.
+        self.steer_move_penalty = float(steer_move_penalty)
+        #: |action| on the steering axis for the tick just decoded, which is
+        #: what that price is charged on.
+        self._steer_move = 0.0
         self._steer_flip = False
         #: The steering axis has had a rate limit (`steer_rate`) and a price
         #: on reversing (`reverse_penalty`) since the smoothing work began.
@@ -700,6 +716,7 @@ class ScuderiaLaneKeep(Env):
             self._v_cmd = float(np.clip(self._v_cmd + accel * rate * self.dt,
                                         0.0, SPEED_MAX))
         prev_steer = self._steer_cmd
+        self._steer_move = abs(float(steer))
         if self.steer_mode == "delta":
             self._steer_cmd = float(np.clip(
                 self._steer_cmd + steer * self.steer_rate * self.dt,
@@ -895,6 +912,7 @@ class ScuderiaLaneKeep(Env):
             self._state = self._state.replace(
                 x=self._state.x.at[0, 3].set(float(self.rolling_start)))
         self._steer_cmd = 0.0
+        self._steer_move = 0.0
         self._accel_cmd = 0.0
         self._accel_jerk = 0.0
         self._prev_vxy = None
@@ -931,7 +949,8 @@ class ScuderiaLaneKeep(Env):
         r_reverse = (-self.reverse_penalty
                      if self.reverse_penalty and self._steer_flip else 0.0)
         r_ajerk = -self.accel_jerk_penalty * self._accel_jerk
-        reward = r_progress + r_grip + r_reverse + r_ajerk
+        r_smove = -self.steer_move_penalty * self._steer_move
+        reward = r_progress + r_grip + r_reverse + r_ajerk + r_smove
         self._t += 1
         x = self._x[0]
         self.history.append(dict(x=float(x[0]), y=float(x[1]), psi=float(x[4]),
@@ -952,13 +971,15 @@ class ScuderiaLaneKeep(Env):
             return (np.zeros(self.obs_dim), -1.0, True, False,
                     {"crashed": bool(crashed), "off_track": off_track,
                      "lateral": lateral, "r_progress": 0.0, "r_grip": 0.0,
-                     "r_reverse": 0.0, "r_accel_jerk": 0.0, "r_crash": -1.0})
+                     "r_reverse": 0.0, "r_accel_jerk": 0.0,
+                     "r_steer_move": 0.0, "r_crash": -1.0})
         truncated = self._t >= self.max_steps
         return (self._obs_from(self._x, self._scans), float(reward), False, truncated,
                 {"crashed": False, "off_track": False, "lateral": lateral,
                  "v": float(x[3]), "r_progress": float(r_progress),
                  "r_grip": float(r_grip), "r_reverse": float(r_reverse),
-                 "r_accel_jerk": float(r_ajerk), "r_crash": 0.0})
+                 "r_accel_jerk": float(r_ajerk),
+                 "r_steer_move": float(r_smove), "r_crash": 0.0})
 
     # -- pictures ----------------------------------------------------------
     def render_rollout(self, history=None, path: str = "rollout.png", title: str = ""):

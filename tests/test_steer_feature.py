@@ -1,4 +1,4 @@
-"""In delta mode the policy drives an integrator; it has to be able to see it.
+"""The steering axis in delta mode: seeing the wheel, and paying to move it.
 
 `steer_mode="delta"` makes the action a steering *rate*: `_decode` keeps a
 setpoint and adds `action * steer_rate * dt` to it. The setpoint is a state
@@ -119,3 +119,104 @@ def test_it_is_off_unless_asked_for():
     env = _bare(False)
     assert env.steer_feature is False
     assert len(_obs(env)) == len(env._idx)
+
+
+# -- the wheel-travel price -------------------------------------------------
+#
+# `steer_move_penalty` charges `|action|` per tick. In delta mode the action
+# is the rate, so the charge is proportional to how far the wheel travels --
+# holding an angle is free and reaching one costs in proportion to the
+# distance. The two costs that came before it do not have that shape:
+# `reverse_penalty` fires only once the wheel has already crossed centre, and
+# CAPS charges for the rate *changing*, so a constant full-rate command --
+# the one that drives the wheel into the stop and holds it there -- is free
+# under both of them.
+
+def _reward_env(**kw):
+    env = _bare(False)
+    env.grip_penalty = 0.0
+    env.grip_target = 0.8
+    env.reverse_penalty = 0.0
+    env.accel_jerk_penalty = 0.0
+    env.steer_move_penalty = 0.0
+    for k, v in kw.items():
+        setattr(env, k, v)
+    return env
+
+
+def _charge(env, level):
+    env._decode(np.array([level, 0.0]))
+    return -env.steer_move_penalty * env._steer_move
+
+
+def test_holding_the_wheel_is_free_and_moving_it_is_not():
+    env = _reward_env(steer_move_penalty=0.1)
+    assert _charge(env, 0.0) == 0.0
+    assert _charge(env, 1.0) == pytest.approx(-0.1)
+    assert _charge(env, -1.0) == pytest.approx(-0.1)
+    assert _charge(env, 0.3) == pytest.approx(-0.03)
+
+
+def test_the_price_is_proportional_to_the_distance_travelled():
+    """Two ways to reach the same angle cost the same."""
+    fast, slow = _reward_env(steer_move_penalty=0.1), _reward_env(steer_move_penalty=0.1)
+    quick = -sum(_charge(fast, 1.0) for _ in range(2))      # 2 ticks at full rate
+    easy = -sum(_charge(slow, 0.5) for _ in range(4))       # 4 at half
+    assert fast._steer_cmd == pytest.approx(slow._steer_cmd)
+    assert quick == pytest.approx(easy)
+
+
+def test_a_constant_full_rate_command_is_charged_every_tick():
+    """What CAPS does not charge for: the command is unchanging, the wheel
+    is not."""
+    env = _reward_env(steer_move_penalty=0.1)
+    assert sum(_charge(env, 1.0) for _ in range(10)) == pytest.approx(-1.0)
+
+
+def test_it_is_off_by_default():
+    assert _reward_env().steer_move_penalty == 0.0
+    env = _reward_env()
+    assert _charge(env, 1.0) == 0.0
+
+
+# -- the mode is not the centre --------------------------------------------
+
+def _head(levels=21):
+    from rtrrl_playground.nets.heads import FactoredCategoricalHead
+    return FactoredCategoricalHead(4, (levels, levels), rng=np.random.default_rng(0))
+
+
+def test_the_expected_level_is_zero_when_the_policy_is_symmetric():
+    """The case that matters: indifferent between a little left and a little
+    right, so the wheel should be held, and the argmax picks a side."""
+    h = _head()
+    sl = h.slices[0]
+    z = np.zeros(h.n_act)
+    # a symmetric pair either side of centre, with the right one a hair
+    # higher -- the mode is +1 level, the expectation is still 0
+    z[sl.start + 9] = 3.0
+    z[sl.start + 11] = 3.0001
+    h.theta = np.zeros((h.n_act, h.n))
+    h.bias = z
+    hid = np.zeros(h.n)
+    assert h.unflat(h.greedy(hid))[0] == 11
+    assert h.unflat(h.mean(hid))[0] == 10          # the hold level
+
+
+def test_the_expected_level_follows_a_one_sided_policy():
+    """It must not just always say zero."""
+    h = _head()
+    sl = h.slices[0]
+    h.theta = np.zeros((h.n_act, h.n))
+    h.bias = np.zeros(h.n_act)
+    h.bias[sl.start + 17] = 8.0
+    assert h.unflat(h.mean(np.zeros(h.n)))[0] == 17
+
+
+def test_the_two_axes_are_averaged_independently():
+    h = _head()
+    h.theta = np.zeros((h.n_act, h.n))
+    h.bias = np.zeros(h.n_act)
+    h.bias[h.slices[0].start + 4] = 8.0
+    h.bias[h.slices[1].start + 16] = 8.0
+    assert list(h.unflat(h.mean(np.zeros(h.n)))) == [4, 16]

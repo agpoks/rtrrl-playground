@@ -502,7 +502,23 @@ class RTRRL:
             return np.clip(mu, self.actor.low, self.actor.high)
         return int(self.actor.act(self.h, self.rng)[0])
 
-    def eval_policy(self, greedy: bool = True):
+    def mean_action(self, obs: np.ndarray, prev_a=None, prev_r: float = 0.0):
+        """One action at the policy's *expected* level, advancing the state.
+
+        Between :meth:`greedy` (the mode) and :meth:`sample_action` (a draw).
+        On an ordinal axis the mode and the mean are different actions and
+        only the mean is steady when the policy is indifferent -- see
+        `FactoredCategoricalHead.mean`. Falls back to the mode for heads with
+        no ordering to average over.
+        """
+        self.h = self.cell.step(self._input(obs, prev_a, prev_r))
+        if isinstance(self.actor, GaussianHead):
+            mu = self.actor.theta @ self.h + self.actor.bias
+            return np.clip(mu, self.actor.low, self.actor.high)
+        fn = getattr(self.actor, "mean", None)
+        return int(fn(self.h)) if fn is not None else self.actor.greedy(self.h)
+
+    def eval_policy(self, greedy: bool = True, mode: str | None = None):
         """A greedy policy for :func:`~rtrrl_playground.train.rollout`.
 
         Evaluating a recurrent, meta-RL agent correctly needs two things that
@@ -518,14 +534,22 @@ class RTRRL:
         So this returns a small stateful object with ``reset()`` and
         ``observe(reward)`` hooks, which ``rollout`` calls at the right moments.
         """
-        return _GreedyPolicy(self, greedy=greedy)
+        return _GreedyPolicy(self, greedy=greedy, mode=mode)
 
 
 class _GreedyPolicy:
     """Stateful greedy wrapper -- see :meth:`RTRRL.eval_policy`."""
 
-    def __init__(self, agent: "RTRRL", greedy: bool = True):
-        self.agent, self.greedy = agent, bool(greedy)
+    def __init__(self, agent: "RTRRL", greedy: bool = True,
+                 mode: str | None = None):
+        # `mode` is the newer, three-way spelling: "greedy" (the mode of the
+        # distribution), "mean" (its expected level, for an ordinal axis) or
+        # "sample". `greedy` stays for every existing caller.
+        self.agent = agent
+        self.mode = mode or ("greedy" if greedy else "sample")
+        if self.mode not in ("greedy", "mean", "sample"):
+            raise ValueError(f"unknown eval mode {self.mode!r}")
+        self.greedy = self.mode == "greedy"
         self.reset()
 
     def reset(self) -> None:
@@ -537,7 +561,8 @@ class _GreedyPolicy:
         self.prev_r = float(reward)
 
     def __call__(self, obs):
-        pick = self.agent.greedy if self.greedy else self.agent.sample_action
+        pick = {"greedy": self.agent.greedy, "mean": self.agent.mean_action,
+                "sample": self.agent.sample_action}[self.mode]
         a = pick(obs, self.prev_a, self.prev_r)
         self.prev_a = a
         return a
