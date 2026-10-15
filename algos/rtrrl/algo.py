@@ -88,6 +88,27 @@ class RTRRL:
     from a flag.
     """
 
+    def _advance(self, x: np.ndarray) -> np.ndarray:
+        """Step the cell, and low-pass what the heads see of it.
+
+        Every path that reads the cell goes through here, so training,
+        greedy evaluation and sampling all see the same filtered state --
+        filtering one and not the others would train one policy and
+        evaluate a different one.
+        """
+        h = self.cell.step(x)
+        if not self.readout_tau:
+            return h
+        a = 1.0 / max(self.readout_tau, 1.0)
+        self._h_f = (h.copy() if self._h_f is None
+                     else (1.0 - a) * self._h_f + a * h)
+        return self._h_f
+
+    def reset_state(self) -> None:
+        """Clear the cell *and* the read-out filter at an episode boundary."""
+        self.cell.reset_state()
+        self._h_f = None
+
     def _fires(self) -> bool:
         """Whether the accumulated update is applied on this step.
 
@@ -128,7 +149,7 @@ class RTRRL:
                  smooth_t: float = 0.0, smooth_s: float = 0.0,
                  smooth_sigma: float = 0.1, smooth_rnn: float = 1.0,
                  cell: str = "ctrnn", estimator: str = "rflo", feedback: str = "random",
-                 head: str = "softmax",
+                 head: str = "softmax", readout_tau: float = 0.0,
                  critic_update: str = "true-online", critic_lr_mode: str = "normalized",
                  meta_inputs: bool = True, clip: float = 1.0,
                  reward_scale: float = 1.0, spike_threshold: float = 0.0,
@@ -211,6 +232,19 @@ class RTRRL:
         self.cell = make_cell(cell, n_in, n_hidden, estimator=estimator,
                               rng=self.rng, **cell_kwargs)
         self.smooth_rnn = float(smooth_rnn)
+        #: Ticks of low-pass between the cell and the heads. A spiking cell
+        #: resets every time it fires, so the state the actor reads is jumpy
+        #: by construction: measured on the car driving a straight, the
+        #: features move 0.03 % of their range per tick, the membranes of the
+        #: neurons that fire 10-14 % of theirs, and the spike vector 18-24 %.
+        #: The policy is a linear read-out of that vector, so the wheel
+        #: inherits it -- which is why pricing or limiting the *command*
+        #: never touched the sawing. Filtering the read-out is the standard
+        #: answer in spiking networks and it keeps the events: the spikes are
+        #: still what arrive, this is what the synapse does with them.
+        #: 0 disables it, and every result before 2026-10-15 was measured so.
+        self.readout_tau = float(readout_tau)
+        self._h_f: np.ndarray | None = None
         self.smoothing = bool(smooth_t or smooth_s)
         head_kw = dict(feedback=feedback, entropy_coef=entropy_coef,
                       sticky_prob=sticky_prob, rng=self.rng)
@@ -275,10 +309,10 @@ class RTRRL:
     # -- interaction ------------------------------------------------------
     def start(self, obs: np.ndarray):
         """Begin an episode: clear state and traces, consume ``o_0``, act."""
-        self.cell.reset_state()
+        self.reset_state()
         self._zero_traces()
         self.actor.reset()  # a sticky action from the last episode is not one now
-        self.h = self.cell.step(self._input(obs, None, 0.0))
+        self.h = self._advance(self._input(obs, None, 0.0))
         # V_old starts at V(s_0) rather than at 0: the true-online correction
         # term is a *difference* between successive weight vectors evaluated at
         # the same state, and seeding it with 0 injects one spurious update
@@ -343,7 +377,7 @@ class RTRRL:
             ds_rnn = self.cell.grad(ds_g)
 
         # --- 3. now advance the recurrent state (and its influence) ----------
-        self.h = self.cell.step(self._input(obs, self.a, reward))
+        self.h = self._advance(self._input(obs, self.a, reward))
         v_next = 0.0 if terminated else self.critic.value(self.h)
         delta = r + self.gamma * v_next - v_now
 
@@ -468,7 +502,7 @@ class RTRRL:
         dW = self.cell.grad(g_actor)
         self.actor.apply(_clip(lr * dtheta_a, self.clip), _clip(lr * dz, self.clip), 1.0)
         self.cell.apply(_clip(dW, self.clip), self.lr_rnn if lr_rnn is None else lr_rnn)
-        self.h = self.cell.step(self._input(obs, a, reward))
+        self.h = self._advance(self._input(obs, a, reward))
         self.a, self.cache = self.actor.act(self.h, self.rng)
         self.stats = {"entropy": self.actor.entropy(self.cache)}
         if terminated or truncated:
@@ -497,7 +531,7 @@ class RTRRL:
         action and reward back in, and a caller that forgets (they all forget)
         evaluates a meta-RL agent with its meta-inputs pinned to zero.
         """
-        self.h = self.cell.step(self._input(obs, prev_a, prev_r))
+        self.h = self._advance(self._input(obs, prev_a, prev_r))
         if isinstance(self.actor, GaussianHead):
             mu = self.actor.theta @ self.h + self.actor.bias
             return np.clip(mu, self.actor.low, self.actor.high)
@@ -513,7 +547,7 @@ class RTRRL:
         well, and behind a safety filter that produces bit-identical scores for
         differently trained networks -- the filter supplying every action.
         """
-        self.h = self.cell.step(self._input(obs, prev_a, prev_r))
+        self.h = self._advance(self._input(obs, prev_a, prev_r))
         if isinstance(self.actor, GaussianHead):
             mu = self.actor.theta @ self.h + self.actor.bias
             return np.clip(mu, self.actor.low, self.actor.high)
@@ -528,7 +562,7 @@ class RTRRL:
         `FactoredCategoricalHead.mean`. Falls back to the mode for heads with
         no ordering to average over.
         """
-        self.h = self.cell.step(self._input(obs, prev_a, prev_r))
+        self.h = self._advance(self._input(obs, prev_a, prev_r))
         if isinstance(self.actor, GaussianHead):
             mu = self.actor.theta @ self.h + self.actor.bias
             return np.clip(mu, self.actor.low, self.actor.high)
@@ -570,7 +604,7 @@ class _GreedyPolicy:
         self.reset()
 
     def reset(self) -> None:
-        self.agent.cell.reset_state()
+        self.agent.reset_state()
         self.agent.actor.reset()
         self.prev_a, self.prev_r = None, 0.0
 
