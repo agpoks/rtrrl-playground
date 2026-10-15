@@ -33,8 +33,10 @@ def _bare(steer_feature, steer_mode="delta", steer_rate=6.0, dt=0.05):
     env.steer_feature = steer_feature
     env.steer_mode = steer_mode
     env.steer_rate = steer_rate
+    env.steer_filter = 0.0
     env.dt = dt
     env._steer_cmd = 0.0
+    env._steer_out = 0.0
     env._steer_flip = False
     env.action_mode = "continuous"
     env.accel_mode = "accl"
@@ -220,3 +222,57 @@ def test_the_two_axes_are_averaged_independently():
     h.bias[h.slices[0].start + 4] = 8.0
     h.bias[h.slices[1].start + 16] = 8.0
     assert list(h.unflat(h.mean(np.zeros(h.n)))) == [4, 16]
+
+
+# -- the low-pass on the angle handed to the servo ---------------------------
+#
+# Eleven interventions on the policy left the wheel crossing centre 7-9
+# times a second on the straights: three prices, a steering-rate ladder, the
+# entropy coefficient, sticky actions, three read-outs of the distribution,
+# an ordinal head and a filter on the state the actor reads. `steer_filter`
+# stops asking the policy and puts a lag in the driver instead. It is not a
+# rate limit -- `steer_rate` is one of those, and at 2 and 3 rad/s it
+# stopped the car cornering without changing how often the wheel reversed.
+# A lag discriminates by frequency, which is the whole point.
+
+def _filt_env(tau, rate=6.0):
+    env = _bare(False, steer_rate=rate)
+    env.steer_filter = tau
+    return env
+
+
+def _drive(env, levels):
+    return np.array([env._decode(np.array([u, 0.0]))[0] for u in levels])
+
+
+def test_a_slow_demand_passes_and_a_fast_one_does_not():
+    """The property that separates a lag from a rate limit."""
+    n = 60
+    slow = [0.15] * n                       # a steady walk to an angle
+    fast = [1.0 if i % 2 else -1.0 for i in range(n)]   # a tick-by-tick dither
+    for levels, keep in ((slow, 0.75), (fast, 0.45)):
+        raw = _drive(_filt_env(0.0), levels)
+        lp = _drive(_filt_env(3.0), levels)
+        span_raw = raw.max() - raw.min()
+        span_lp = lp.max() - lp.min()
+        if keep > 0.5:
+            assert span_lp > keep * span_raw        # the corner survives
+        else:
+            assert span_lp < keep * span_raw        # the dither does not
+
+
+def test_it_is_off_by_default_and_then_the_servo_gets_the_setpoint():
+    env = _bare(False)
+    assert env.steer_filter == 0.0
+    out = _drive(env, [1.0] * 3)
+    assert out[-1] == pytest.approx(env._steer_cmd)
+
+
+def test_the_wheel_feature_reports_what_the_servo_was_given():
+    """Or the policy is told it is holding an angle the wheel never got."""
+    env = _bare(True, steer_rate=6.0)
+    env.steer_filter = 3.0
+    for _ in range(5):
+        env._decode(np.array([1.0, 0.0]))
+    assert _obs(env)[-1] == pytest.approx(env._steer_out / STEER_MAX)
+    assert env._steer_out < env._steer_cmd          # and they differ

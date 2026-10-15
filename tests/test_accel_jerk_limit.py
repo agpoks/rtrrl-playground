@@ -33,7 +33,10 @@ def _bare(accel_rate, dt=0.05, accel_cmd=10.0):
     env.dt = dt
     env.steer_mode = "absolute"
     env.steer_rate = 6.0
+    env.steer_filter = 0.0
     env._steer_cmd = 0.0
+    env._steer_out = 0.0
+    env._steer_move = 0.0
     env._steer_flip = False
     return env
 

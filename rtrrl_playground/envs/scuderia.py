@@ -76,6 +76,7 @@ class ScuderiaLaneKeep(Env):
                  n_steer: int = N_STEER, n_accel: int = N_ACCEL,
                  lookahead=None, aim_feature: bool = False,
                  steer_mode: str = "absolute", steer_rate: float = 2.0,
+                 steer_filter: float = 0.0,
                  drive_features: bool = False, proprio: bool = False,
                  grip_feature: bool = False, steer_feature: bool = False,
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
@@ -286,6 +287,18 @@ class ScuderiaLaneKeep(Env):
         if steer_mode not in ("absolute", "delta"):
             raise ValueError("steer_mode must be 'absolute' or 'delta'")
         self.steer_mode, self.steer_rate = steer_mode, float(steer_rate)
+        #: Ticks of first-order low-pass on the angle handed to the servo.
+        #: Not a rate limit -- `steer_rate` is one of those, and at 2 and 3
+        #: rad/s it stopped the car cornering without changing how often the
+        #: wheel reversed. A lag attenuates by frequency instead: at tau = 3
+        #: ticks a corner's half-hertz demand passes nearly intact while the
+        #: 4 Hz dither measured on the straights is cut severalfold. It is
+        #: also the one place this can be fixed on the real car without the
+        #: policy's cooperation, because it lives in the driver, not the
+        #: reward. Eleven interventions on the policy left the straight-line
+        #: crossing rate at 7-9 a second; this one does not ask it to learn.
+        self.steer_filter = float(steer_filter)
+        self._steer_out = 0.0
         self.obs_dim = (self.n_beams_out + int(observe_speed)
                         + (0 if self.lookahead is None else len(self.lookahead))
                         + int(self.aim_feature)
@@ -728,6 +741,10 @@ class ScuderiaLaneKeep(Env):
         # in both steering modes: in delta mode the action is a rate, whose
         # sign changes on every normal corner exit.
         self._steer_flip = bool(prev_steer * self._steer_cmd < 0.0)
+        if self.steer_filter:
+            a = 1.0 / max(self.steer_filter, 1.0)
+            self._steer_out = (1.0 - a) * self._steer_out + a * self._steer_cmd
+            return np.array([self._steer_out, self._v_cmd])
         return np.array([self._steer_cmd, self._v_cmd])
 
     def _pull(self, state):
@@ -807,13 +824,16 @@ class ScuderiaLaneKeep(Env):
                                             float(x[0, 1]), float(x[0, 4]),
                                             self.lookahead))
         if self.steer_feature:
+            # the filtered command when there is one: the policy should see
+            # the angle the servo was given, not the one it asked for
             # Last, so that turning it on does not move any existing feature:
             # a saved policy, a figure's axis labels and the feature indices
             # written down elsewhere all keep meaning what they meant. The
             # *commanded* setpoint, not `x[0, 2]`, which is where the servo
             # has got to -- the command is what the action adds to and the
             # only one of the two the car knows without a sensor.
-            parts.append(np.array([self._steer_cmd / STEER_MAX]))
+            w = self._steer_out if self.steer_filter else self._steer_cmd
+            parts.append(np.array([w / STEER_MAX]))
         return np.concatenate(parts) if len(parts) > 1 else parts[0]
 
     def _reward(self, x: np.ndarray, x_prev: np.ndarray) -> float:
@@ -912,6 +932,7 @@ class ScuderiaLaneKeep(Env):
             self._state = self._state.replace(
                 x=self._state.x.at[0, 3].set(float(self.rolling_start)))
         self._steer_cmd = 0.0
+        self._steer_out = 0.0
         self._steer_move = 0.0
         self._accel_cmd = 0.0
         self._accel_jerk = 0.0
