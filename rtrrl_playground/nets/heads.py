@@ -381,7 +381,7 @@ class OrdinalGaussianHead:
 
     def __init__(self, n_hidden: int, nvec, feedback: str = "random",
                  sticky_prob: float = 0.0, sigma_init: float = 0.35,
-                 sigma_min: float = 0.04, sigma_max: float = 1.0,
+                 sigma_min: float = 0.12, sigma_max: float = 1.0,
                  rng: np.random.Generator | None = None, **_ignored):
         rng = rng or np.random.default_rng(0)
         self.nvec = tuple(int(x) for x in nvec)
@@ -401,6 +401,11 @@ class OrdinalGaussianHead:
         self.B = rng.normal(0, 1.0 / np.sqrt(self.n), (self.n_act, self.n))
         self.feedback = feedback
         self.sticky_prob = float(sticky_prob)
+        # The floor is above the level spacing (2/(k-1), so 0.1 on a 21-level
+        # axis) on purpose. Below it the distribution is a delta on one level:
+        # exploration stops, and the location gradient -- which carries
+        # 1/sigma^2 -- blows up at the same time. Measured at 0.04, the policy
+        # saturated at full lock inside 25,000 steps and drove 3 m.
         self.sigma_min, self.sigma_max = float(sigma_min), float(sigma_max)
         self.prev_a: int | None = None
         self.levels = [np.linspace(-1.0, 1.0, k) for k in self.nvec]
@@ -467,24 +472,40 @@ class OrdinalGaussianHead:
         return np.array([float(pi[sl] @ lv)
                          for sl, lv in zip(self.slices, self.levels)])
 
-    def grads(self, h: np.ndarray, a: int, cache):
-        """``d log pi(a) / d(location, log width)``, stacked per axis.
+    def grads(self, h: np.ndarray, a: int, cache, natural: bool = True):
+        """``d log pi(a) / d(location, width)``, stacked per axis.
 
         A softmax over logits ``-(level - mu)^2 / 2 sigma^2``, so the usual
-        score function in terms of those two parameters, with the tanh
-        derivative on the location.
+        score function in those two parameters, with the squash derivatives.
+
+        **Preconditioned by default.** The raw score carries ``1 / sigma^2``
+        on the location and ``1 / sigma`` on the width, so its scale depends
+        on how certain the policy currently is -- at the initial width it is
+        already eight times the softmax head's O(1) score, and it grows
+        without bound as the policy sharpens. Sharing one actor learning
+        rate with the softmax head then means taking eight-fold steps and
+        then larger ones, and measured, that saturated the location at full
+        lock inside 25,000 steps and drove 3 m.
+
+        Scaling by ``sigma^2`` and ``sigma`` is the Fisher preconditioner for
+        a Gaussian's location and scale, up to a constant: the direction is
+        still ascent, the magnitude no longer depends on the policy's own
+        certainty. ``natural=False`` returns the plain score, which is what
+        the finite difference test checks.
         """
         pi, mu, sig, g = cache
         span = self.sigma_max - self.sigma_min
         dz = np.zeros(self.n_act)
         for i, (sl, lv) in enumerate(zip(self.slices, self.levels)):
             p, j = pi[sl], self.unflat(a)[i]
-            d = (lv - mu[i]) / sig[i] ** 2
-            dz[2 * i] = (d[j] - float(p @ d)) * (1.0 - mu[i] ** 2)
-            q = ((lv - mu[i]) ** 2) / sig[i] ** 2
-            # d logp / d sigma, then sigma's own derivative through the squash
-            dz[2 * i + 1] = ((q[j] - float(p @ q)) / sig[i]
-                             * span * g[i] * (1.0 - g[i]))
+            s2 = sig[i] ** 2
+            d = (lv - mu[i]) / s2
+            q = ((lv - mu[i]) ** 2) / s2
+            loc = (d[j] - float(p @ d)) * (1.0 - mu[i] ** 2)
+            wid = (q[j] - float(p @ q)) / sig[i] * span * g[i] * (1.0 - g[i])
+            if natural:
+                loc, wid = loc * s2, wid * sig[i]
+            dz[2 * i], dz[2 * i + 1] = loc, wid
         back = self.B if self.feedback == "random" else self.theta
         return np.outer(dz, h), dz, back.T @ dz
 

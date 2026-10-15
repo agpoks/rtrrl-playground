@@ -73,7 +73,7 @@ def test_the_score_function_is_the_true_gradient():
                    for i, sl in enumerate(g.slices))
 
     a, cache = h.act(hid, rng)
-    _dt, dz, _g = h.grads(hid, a, cache)
+    _dt, dz, _g = h.grads(hid, a, cache, natural=False)
     eps, num = 1e-6, np.zeros_like(dz)
     for k in range(len(dz)):
         b1, b2 = h.bias.copy(), h.bias.copy()
@@ -81,6 +81,53 @@ def test_the_score_function_is_the_true_gradient():
         b2[k] -= eps
         num[k] = (logp(b1, a) - logp(b2, a)) / (2 * eps)
     assert np.allclose(dz, num, atol=1e-5)
+
+
+def test_the_preconditioned_gradient_is_bounded_and_points_the_same_way():
+    """The scale must not depend on how certain the policy is.
+
+    The raw score carries 1/sigma^2 on the location, so it is eight times
+    the softmax head's at the initial width and unbounded as the policy
+    sharpens. Sharing one actor learning rate with that is what drove the
+    first version of this head to full lock in 25,000 steps.
+    """
+    rng = np.random.default_rng(5)
+    h = _head(5)
+    h.theta = rng.normal(0, 0.4, h.theta.shape)
+    hid = rng.normal(0, 1, h.n)
+    for width in (-3.0, 0.0, 3.0):          # narrow, middling, wide
+        h.bias = np.zeros(h.n_act)
+        h.bias[1::2] = width
+        a, cache = h.act(hid, rng)
+        raw = h.grads(hid, a, cache, natural=False)[1]
+        nat = h.grads(hid, a, cache, natural=True)[1]
+        assert np.all(np.sign(raw) == np.sign(nat))     # same direction
+        assert np.abs(nat).max() <= 2.0 + 1e-9          # and bounded
+
+
+def test_it_learns_which_level_pays():
+    """The test the first version of this head would have failed.
+
+    One axis, one rewarded level, no dynamics: the location has to walk to
+    it. A head whose gradient explodes as it sharpens saturates instead.
+    """
+    from algos.rtrrl.algo import RTRRL
+    from rtrrl_playground.spaces import Discrete
+    want = 16                                   # a level well off centre
+    ag = RTRRL(obs_dim=2, action_space=Discrete(441, nvec=NVEC), n_hidden=8,
+               cell="ctrnn", seed=0, head="ordinal")
+    obs = np.ones(2)
+    a = ag.start(obs)
+    for _ in range(4000):
+        r = 1.0 - abs(ag.actor.unflat(a)[0] - want) / 20.0
+        a = ag.step(obs, r, False, False)
+    got = ag.actor.unflat(ag.greedy(obs))[0]
+    # Two levels, not three: measured, the unpreconditioned version lands on
+    # 19 against the wanted 16 -- it saturates past the target rather than
+    # settling on it -- so a tolerance of three would pass the bug.
+    assert abs(got - want) <= 2, f"ended at level {got}, wanted {want}"
+    # and it must not have driven the width into the floor to get there
+    assert ag.actor._params(ag.h)[1][0] > ag.actor.sigma_min * 1.5
 
 
 def test_the_width_is_bounded_both_ways():
