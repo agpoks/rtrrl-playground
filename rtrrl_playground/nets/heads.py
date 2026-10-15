@@ -340,6 +340,177 @@ class FactoredCategoricalHead:
         return self.flat(idx)
 
 
+class OrdinalGaussianHead:
+    """A location and a width over *ordered* levels, instead of free logits.
+
+    The softmax head treats the 21 steering levels as unordered categories:
+    level 10 and level 11 share no parameters, so "a little left" is not near
+    "straight" in the model and nothing makes the distribution local.
+    Measured on this car, it does not stay local -- the middle third of the
+    rate axis, seven of the twenty-one levels, receives 2-6 % of the commands
+    in every version tried, on the straights and in the corners alike. The
+    policy is bang-bang in the rate, and that is why no cost on the output
+    changed it: the prices were paid and the shape stayed. It is also why
+    neither read-out of that distribution is any good -- its mode picks a
+    side and saws, its expectation averages "hard left or hard right" into
+    "barely turn" and cannot corner.
+
+    So this head parameterises the distribution rather than the logits:
+
+        mu    = tanh(w_mu . h + b)                    location, -1..1
+        sigma = lo + (hi - lo) * sigmoid(w_s . h + b) width, same units
+        p(j) proportional to exp(-(level_j - mu)^2 / 2 sigma^2)
+
+    The width is squashed into its range rather than exponentiated and
+    clipped: a clip has no gradient at the bound, so a policy that reached
+    one could never come back, and the score function would stop matching
+    the distribution exactly where it is pinned. Caught by the finite
+    difference test, which is why it is written down here.
+
+    Unimodal by construction, local by construction, and the quantity the
+    gradient moves is where the wheel should go rather than the score of one
+    level among twenty-one. The mode and the mean coincide, so there is no
+    choice to get wrong at deployment. Two parameters an axis instead of 21.
+
+    No entropy bonus. In this agent that term is added to the logit gradient
+    and then multiplied by the TD error, so its sign follows `delta` -- it is
+    not a bonus on entropy, and measured, cutting it tenfold made the policy
+    *more* entropic. Here the spread is an explicit parameter with its own
+    gradient, which is the honest way to have one.
+    """
+
+    def __init__(self, n_hidden: int, nvec, feedback: str = "random",
+                 sticky_prob: float = 0.0, sigma_init: float = 0.35,
+                 sigma_min: float = 0.04, sigma_max: float = 1.0,
+                 rng: np.random.Generator | None = None, **_ignored):
+        rng = rng or np.random.default_rng(0)
+        self.nvec = tuple(int(x) for x in nvec)
+        if any(x < 2 for x in self.nvec):
+            raise ValueError(f"every axis needs >= 2 levels, got {self.nvec}")
+        self.n = int(n_hidden)
+        #: two parameters an axis: the location and the log width
+        self.n_act = 2 * len(self.nvec)
+        self.n_joint = int(np.prod(self.nvec))
+        self.theta = np.zeros((self.n_act, self.n))
+        self.bias = np.zeros(self.n_act)
+        # start at the middle of the axis with a width of a few levels, so
+        # the first actions explore locally rather than at the stops
+        f = (float(sigma_init) - sigma_min) / (sigma_max - sigma_min)
+        f = min(max(f, 1e-4), 1 - 1e-4)
+        self.bias[1::2] = np.log(f / (1.0 - f))
+        self.B = rng.normal(0, 1.0 / np.sqrt(self.n), (self.n_act, self.n))
+        self.feedback = feedback
+        self.sticky_prob = float(sticky_prob)
+        self.sigma_min, self.sigma_max = float(sigma_min), float(sigma_max)
+        self.prev_a: int | None = None
+        self.levels = [np.linspace(-1.0, 1.0, k) for k in self.nvec]
+        self.strides = np.ones(len(self.nvec), dtype=int)
+        for i in range(len(self.nvec) - 2, -1, -1):
+            self.strides[i] = self.strides[i + 1] * self.nvec[i + 1]
+        # where each axis's probability vector sits in the stacked cache, so
+        # the same figures and metrics read it the same way as the softmax
+        self.slices, o = [], 0
+        for k in self.nvec:
+            self.slices.append(slice(o, o + k))
+            o += k
+
+    @property
+    def n_params(self) -> int:
+        return self.theta.size + self.bias.size
+
+    def flat(self, idx) -> int:
+        return int(np.dot(np.asarray(idx, dtype=int), self.strides))
+
+    def unflat(self, a: int):
+        a, out = int(a), []
+        for st in self.strides:
+            out.append(a // st)
+            a = a % st
+        return out
+
+    def _params(self, h: np.ndarray):
+        z = self.theta @ h + self.bias
+        mu = np.tanh(z[0::2])
+        g = 1.0 / (1.0 + np.exp(-z[1::2]))
+        sig = self.sigma_min + (self.sigma_max - self.sigma_min) * g
+        return mu, sig, g
+
+    def _pmf(self, mu, sig):
+        pi = np.empty(sum(self.nvec))
+        for i, (sl, lv) in enumerate(zip(self.slices, self.levels)):
+            pi[sl] = softmax(-0.5 * ((lv - mu[i]) / sig[i]) ** 2)
+        return pi
+
+    def act(self, h: np.ndarray, rng: np.random.Generator):
+        mu, sig, g = self._params(h)
+        pi = self._pmf(mu, sig)
+        idx = []
+        for sl in self.slices:
+            j = int(np.searchsorted(np.cumsum(pi[sl]), rng.random()))
+            idx.append(min(j, sl.stop - sl.start - 1))
+        a = self.flat(idx)
+        if (self.sticky_prob > 0.0 and self.prev_a is not None
+                and rng.random() < self.sticky_prob):
+            a = self.prev_a
+        self.prev_a = a
+        return a, (pi, mu, sig, g)
+
+    def reset(self) -> None:
+        self.prev_a = None
+
+    @staticmethod
+    def _pi(cache):
+        return cache[0] if isinstance(cache, tuple) else cache
+
+    def means(self, cache) -> np.ndarray:
+        pi = self._pi(cache)
+        return np.array([float(pi[sl] @ lv)
+                         for sl, lv in zip(self.slices, self.levels)])
+
+    def grads(self, h: np.ndarray, a: int, cache):
+        """``d log pi(a) / d(location, log width)``, stacked per axis.
+
+        A softmax over logits ``-(level - mu)^2 / 2 sigma^2``, so the usual
+        score function in terms of those two parameters, with the tanh
+        derivative on the location.
+        """
+        pi, mu, sig, g = cache
+        span = self.sigma_max - self.sigma_min
+        dz = np.zeros(self.n_act)
+        for i, (sl, lv) in enumerate(zip(self.slices, self.levels)):
+            p, j = pi[sl], self.unflat(a)[i]
+            d = (lv - mu[i]) / sig[i] ** 2
+            dz[2 * i] = (d[j] - float(p @ d)) * (1.0 - mu[i] ** 2)
+            q = ((lv - mu[i]) ** 2) / sig[i] ** 2
+            # d logp / d sigma, then sigma's own derivative through the squash
+            dz[2 * i + 1] = ((q[j] - float(p @ q)) / sig[i]
+                             * span * g[i] * (1.0 - g[i]))
+        back = self.B if self.feedback == "random" else self.theta
+        return np.outer(dz, h), dz, back.T @ dz
+
+    def apply(self, dtheta, dbias, lr: float) -> None:
+        self.theta += lr * dtheta
+        self.bias += lr * dbias
+
+    def entropy(self, cache) -> float:
+        pi = self._pi(cache)
+        tot = 0.0
+        for sl in self.slices:
+            p = pi[sl]
+            tot += float(-(p * np.log(np.clip(p, 1e-12, None))).sum())
+        return tot
+
+    def greedy(self, h: np.ndarray) -> int:
+        mu, _sig, _g = self._params(h)
+        return self.flat([int(np.argmin(np.abs(lv - mu[i])))
+                          for i, lv in enumerate(self.levels)])
+
+    #: the distribution is symmetric about `mu`, so its expectation is its
+    #: mode up to the discretisation -- the two read-outs agree here, which
+    #: is the point of having a location parameter at all
+    mean = greedy
+
+
 class GaussianHead:
     """Diagonal Gaussian policy: state-dependent mean, state-independent log-sigma.
 

@@ -54,7 +54,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from rtrrl_playground.nets import make_cell  # noqa: E402
 from rtrrl_playground.nets.heads import (CategoricalHead,  # noqa: E402
                                          FactoredCategoricalHead,
-                                         GaussianHead, ValueHead)
+                                         GaussianHead, OrdinalGaussianHead,
+                                         ValueHead)
 from rtrrl_playground.spaces import Box, Discrete  # noqa: E402
 from rtrrl_playground.traces import accumulating_trace, dutch_trace  # noqa: E402
 
@@ -127,6 +128,7 @@ class RTRRL:
                  smooth_t: float = 0.0, smooth_s: float = 0.0,
                  smooth_sigma: float = 0.1, smooth_rnn: float = 1.0,
                  cell: str = "ctrnn", estimator: str = "rflo", feedback: str = "random",
+                 head: str = "softmax",
                  critic_update: str = "true-online", critic_lr_mode: str = "normalized",
                  meta_inputs: bool = True, clip: float = 1.0,
                  reward_scale: float = 1.0, spike_threshold: float = 0.0,
@@ -219,9 +221,24 @@ class RTRRL:
             # separating 441 actions from one sample per 50 ms tick.
             nvec = getattr(action_space, "nvec", None)
             if nvec is not None and len(nvec) > 1:
-                self.actor = FactoredCategoricalHead(
-                    n_hidden, nvec, smooth_t=smooth_t, smooth_s=smooth_s,
-                    smooth_sigma=smooth_sigma, **head_kw)
+                if head == "ordinal":
+                    # A location and a width over the ordered levels instead
+                    # of 21 free logits an axis. The softmax has no notion
+                    # that level 11 is next to level 10, and measured on the
+                    # car it does not learn one: the middle third of the
+                    # steering axis gets 2-6 % of the commands and the policy
+                    # is bang-bang in the rate.
+                    if smooth_t or smooth_s:
+                        raise ValueError(
+                            "CAPS smoothing is written against the softmax "
+                            "head's per-level logits; it has no meaning for "
+                            "head='ordinal', whose parameters are a location "
+                            "and a width")
+                    self.actor = OrdinalGaussianHead(n_hidden, nvec, **head_kw)
+                else:
+                    self.actor = FactoredCategoricalHead(
+                        n_hidden, nvec, smooth_t=smooth_t, smooth_s=smooth_s,
+                        smooth_sigma=smooth_sigma, **head_kw)
             else:
                 self.actor = CategoricalHead(n_hidden, action_space.n, **head_kw)
         elif isinstance(action_space, Box):
