@@ -113,6 +113,7 @@ class LaneKeep(Env):
                  lookahead=None, aim_feature: bool = False,
                  steer_mode: str = "absolute", steer_rate: float = 2.0,
                  drive_features: bool = False, proprio: bool = False,
+                 steer_feature: bool = False, factored_actions: bool = False,
                  start_jitter: float = 0.3, seed: int | None = None):
         if action_mode not in ("discrete", "continuous"):
             raise ValueError("action_mode must be 'discrete' or 'continuous'")
@@ -168,11 +169,18 @@ class LaneKeep(Env):
         self.drive_features = bool(drive_features)   # see scuderia's notes
         self.proprio = bool(proprio)
         self._prev_vxy = None
+        #: The wheel angle the policy is currently commanding, as a fraction
+        #: of lock. In `delta` mode the action is a rate and `self.delta` is
+        #: the integrator it drives, so without this the policy cannot see
+        #: the angle it is holding. On the scuderia car this was worth 5/5
+        #: seeds and 107 -> 149 m; it is the same feature here.
+        self.steer_feature = bool(steer_feature)
         self.obs_dim = (self.n_beams + int(self.observe_speed)
                         + (0 if self.lookahead is None else len(self.lookahead))
                         + int(self.aim_feature)
                         + 3 * int(self.drive_features)
-                        + 5 * int(self.proprio))
+                        + 5 * int(self.proprio)
+                        + int(self.steer_feature))
         # A flat softmax over steer x accel rather than two heads: one
         # categorical distribution is one gradient to derive. The *resolution*
         # is `n_steer` x `n_accel`, defaulting to the 3 x 3 every result
@@ -190,7 +198,14 @@ class LaneKeep(Env):
         # change to every lanekeep result measured at 3x3. The two envs
         # therefore disagree until someone re-measures the lanekeep
         # baselines on purpose.
-        self.action_space = (Discrete(len(self.action_grid))
+        # `factored_actions` passes it, which is the right thing at 21x21 --
+        # a flat softmax there is a 441-way distribution fed one sample per
+        # tick -- and which is why it is off by default: switching it on
+        # changes the previous-action encoding from a one-hot to two ordinal
+        # values, and every lanekeep result on record was measured at 3x3
+        # without it.
+        nvec = (int(n_steer), int(n_accel)) if factored_actions else None
+        self.action_space = (Discrete(len(self.action_grid), nvec=nvec)
                              if action_mode == "discrete" else Box(2))
         self._rng = np.random.default_rng(seed)
         self._reset_state()
@@ -251,6 +266,9 @@ class LaneKeep(Env):
                 np.clip(self.yaw_rate / 3.0, -1.0, 1.0),
                 np.clip(ax / 10.0, -1.0, 1.0),
                 np.clip(ay / 10.0, -1.0, 1.0)]))
+        if self.steer_feature:
+            # last, so turning it on does not move any existing feature
+            parts.append(np.array([self.delta / self.vehicle.steer_max]))
         self._last_beams = (ranges, flags)
         return np.concatenate(parts)
 
