@@ -421,3 +421,86 @@ def drive_features(ranges: np.ndarray, angles: np.ndarray, beam_range: float,
     return np.array([np.clip(free_ahead, 0.0, 1.0),
                      np.clip(aim / HEADING_SCALE, -1.0, 1.0),
                      np.clip(bend / HEADING_SCALE, -1.0, 1.0)], dtype=float)
+
+
+#: Letters naming the six disparity-extender features, in the order the
+#: proposal lists them. A spec string selects a subset: ``"b"`` is the one
+#: new number, ``"bcf"`` is the geometry of the gap without its motion.
+DE_LETTERS = "abcdef"
+
+#: f5 fires when the preferred direction moves more than this in one step.
+#: 10 deg is about seven beams of the car's 1080-beam scan and a quarter of
+#: the steering lock -- small enough to catch a target hopping between two
+#: gaps, large enough not to fire on scan noise.
+DE_SWITCH = np.radians(10.0)
+
+#: f4 is a rate, and needs a scale that does not change meaning with `dt`.
+#: A swing across the whole forward sector in 100 ms reads as 1.0.
+DE_RATE_SCALE = HEADING_SCALE / 0.1
+
+
+def de_features(ranges: np.ndarray, angles: np.ndarray, beam_range: float,
+                spec: str = "b", car_half_width: float = 0.20,
+                cone_deg: float = 6.0, prev_theta: float | None = None,
+                dt: float = 0.05, switch: float = DE_SWITCH,
+                gap_frac: float = 0.9, margin: float = 0.0):
+    """Compact geometry off the disparity-extended scan: ``(features, theta)``.
+
+    One pass of :func:`..scripted.disparity_target` answers all six, so a
+    spec of ``"bcdef"`` costs the same as ``"b"``. The second return value is
+    :math:`\theta_{safe}`, which the caller stores to get ``d`` and ``e`` on
+    the next step; ``None`` for ``prev_theta`` is the first step of an
+    episode and makes both read 0.
+
+    ======  =============================================================
+    ``a``   :math:`\theta_{safe}/(\pi/2)` -- where the longest safe straight
+            points. Identical to ``aim_feature``, which already exists; here
+            for completeness so a pure-extender arm can be expressed.
+    ``b``   :math:`d_{safe}/d_{max}` -- **how long that straight is.** The
+            one number the extender computes and the project has never had:
+            ``free_ahead`` and the corridor gate both take a *minimum over a
+            cone of the raw scan*, which reads the side wall wherever the
+            corridor is narrower than the cone is wide, while this is the
+            extended range in the chosen direction and needs no threshold.
+    ``c``   forward clearance, :math:`\min \tilde d` over
+            :math:`|\theta| \le` ``cone_deg``, on the **extended** scan --
+            the same shape as ``free_ahead`` but width-corrected.
+    ``d``   :math:`\Delta\theta_{safe}/\Delta t`, how fast the preferred
+            direction is moving. Note that cornering moves it by ego-motion
+            alone, so this is not an instability measure on its own.
+    ``e``   :math:`\mathbb{1}[|\Delta\theta_{safe}| > `` switch ``]``, the
+            target-switch flag. Binary, and subject to the same caveat.
+    ``f``   angular width of the region the target sits in, over
+            :math:`\pi`. Angular, not metric -- see
+            :func:`..scripted.disparity_target`.
+    ======  =============================================================
+    """
+    from rtrrl_playground.envs.scripted import disparity_target
+    bad = set(spec) - set(DE_LETTERS)
+    if bad:
+        raise ValueError(f"unknown de_features letter(s) {sorted(bad)}; "
+                         f"the six are {DE_LETTERS!r}")
+    ang = np.asarray(angles, dtype=float)
+    r = np.asarray(ranges, dtype=float)
+    fwd = np.abs(ang) <= (np.pi / 2)
+    t = disparity_target(r[fwd], ang[fwd], car_half_width, margin,
+                         gap_frac=gap_frac)
+    d_th = 0.0 if prev_theta is None else float(t.theta - prev_theta)
+    out = []
+    for ch in spec:
+        if ch == "a":
+            out.append(np.clip(t.theta / HEADING_SCALE, -1.0, 1.0))
+        elif ch == "b":
+            out.append(np.clip(t.d_safe / beam_range, 0.0, 1.0))
+        elif ch == "c":
+            a_ = ang[fwd]
+            cone = np.abs(a_) <= np.radians(cone_deg)
+            v = float(np.min(t.ext[cone])) if cone.any() else beam_range
+            out.append(np.clip(v / beam_range, 0.0, 1.0))
+        elif ch == "d":
+            out.append(np.clip(d_th / max(dt, 1e-9) / DE_RATE_SCALE, -1.0, 1.0))
+        elif ch == "e":
+            out.append(1.0 if abs(d_th) > switch else 0.0)
+        elif ch == "f":
+            out.append(np.clip(t.width / np.pi, 0.0, 1.0))
+    return np.array(out, dtype=float), float(t.theta)

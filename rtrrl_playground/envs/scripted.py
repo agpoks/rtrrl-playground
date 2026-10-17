@@ -21,6 +21,8 @@ anywhere a policy does.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
 
 N_BEAMS = 9
@@ -94,30 +96,135 @@ def free_space_heading(ranges: np.ndarray, angles: np.ndarray,
     rule the scripted baseline drives on is the rule the feature reports, so a
     policy given this feature and the gap-follower are looking at one quantity.
     """
+    return disparity_target(ranges, angles, car_half_width).theta
+
+
+class DisparityTarget(NamedTuple):
+    """What the disparity extender knows after one scan.
+
+    ``free_space_heading`` returns only ``theta`` and throws the rest away.
+    Every other quantity below was already computed to get it.
+    """
+
+    #: direction of the furthest safely reachable space, rad, 0 = straight on
+    theta: float
+    #: the extended range in that direction, metres -- how long the straight is
+    d_safe: float
+    #: angular width of the contiguous region the target sits in, rad
+    width: float
+    #: the width-corrected scan itself, same shape as ``ranges``
+    ext: np.ndarray
+
+
+def disparity_extend(ranges: np.ndarray, angles: np.ndarray,
+                     car_half_width: float = 0.20, margin: float = 0.0,
+                     disparity: float | None = None,
+                     geometry: str = "atan") -> np.ndarray:
+    r"""The width-corrected scan :math:`\tilde d`, from the F1TENTH extender.
+
+    Where two adjacent beams differ by more than ``disparity`` metres there is
+    an edge, and the far reading belongs to something the car may not fit
+    past. The near reading is therefore widened across the angle a body of
+    half-width :math:`r_s = w/2 + m` subtends at that range,
+
+    .. math:: \alpha = \arctan(r_s / d_{near}),\qquad
+              n = \lceil \alpha / |\Delta\theta| \rceil
+
+    and the beams on the far side are overwritten with
+    :math:`\tilde d_j = \min(\tilde d_j, d_{near})` -- never upwards, so
+    several disparities compose and the result is a lower bound.
+
+    ``arctan`` and not ``arcsin``: :math:`r_s` is a *lateral* offset at range
+    :math:`d`, and the angle such an offset subtends is
+    :math:`\arctan(r_s/d)`. :math:`\arcsin` is the tangent-to-a-circle
+    version of the same correction; the two agree to 2 % while
+    :math:`r_s/d < 0.35` and ``arctan`` has no domain limit, which is why it
+    is the default. ``geometry='asin'`` gives the circle version, and treats
+    :math:`d_{near} \le r_s` -- the car cannot pass on that side at all --
+    by blocking the whole half-scan rather than producing a NaN.
+
+    Conservative handling, stated rather than implied. A non-finite or
+    non-positive range is an invalid measurement, not an obstacle at 0 m: it
+    reads as 0 so it can never win the argmax, and it is **skipped** when
+    looking for edges. Both halves matter. Treating a dropout as a real
+    reading of 0 m made it a disparity with :math:`d_{near}\approx 0`, whose
+    inflation is :math:`\arctan(r_s/0) \to 90^\circ` on each side -- so one
+    dropped beam blanked half the scan and threw the target 22 deg off, which
+    is measurably what the first version of this did. Beam spacing comes from
+    the actual angles, so a scan at a different resolution is widened by its
+    own spacing rather than an assumed constant.
+
+    Factored out of :func:`free_space_heading`, which now calls it, so the
+    features built on the extended scan and the heading the scripted
+    gap-follower drives on are one piece of arithmetic.
+    """
     ang = np.asarray(angles, dtype=float)
     r = np.asarray(ranges, dtype=float)
+    r = np.where(np.isfinite(r) & (r > 0.0), r, 0.0)
     n = len(ang)
     if n < 3:
-        return 0.0
+        return r.copy()
+    ok = np.isfinite(np.asarray(ranges, dtype=float)) & (r > 0.0)
+    r_s = float(car_half_width) + float(margin)
+    tau = 2 * float(car_half_width) if disparity is None else float(disparity)
     d_ang = float(ang[-1] - ang[0]) / (n - 1)
     ext = r.copy()
     for i in range(n - 1):
-        if abs(r[i + 1] - r[i]) < 2 * car_half_width:
+        if not (ok[i] and ok[i + 1]):
+            continue
+        if abs(r[i + 1] - r[i]) < tau:
             continue
         near, far = (i, i + 1) if r[i] < r[i + 1] else (i + 1, i)
-        k = int(np.ceil(np.arctan2(car_half_width, max(r[near], 1e-3))
-                        / max(d_ang, 1e-6)))
+        d_near = max(r[near], 1e-3)
+        if geometry == "asin":
+            a = (np.pi / 2) if d_near <= r_s else float(np.arcsin(r_s / d_near))
+        else:
+            a = float(np.arctan2(r_s, d_near))
+        k = int(np.ceil(a / max(d_ang, 1e-6)))
         lo, hi = ((far, min(far + k + 1, n)) if far > near
                   else (max(far - k, 0), far + 1))
         ext[lo:hi] = np.minimum(ext[lo:hi], r[near])
+    return ext
+
+
+def disparity_target(ranges: np.ndarray, angles: np.ndarray,
+                     car_half_width: float = 0.20, margin: float = 0.0,
+                     disparity: float | None = None,
+                     geometry: str = "atan",
+                     gap_frac: float = 0.9) -> DisparityTarget:
+    """Step 4 of the extender, plus the two numbers it discards.
+
+    ``width`` is the contiguous angular run containing the target over which
+    the extended scan stays within ``gap_frac`` of ``d_safe``. That is the
+    stated clearance criterion -- a *relative* one, so it means the same on a
+    5 m straight and a 2 m corner -- and it is an **angular** gap width. The
+    metric width of the opening is about ``2 * d_safe * sin(width / 2)`` and
+    is a different quantity; nothing here reports it.
+    """
+    ang = np.asarray(angles, dtype=float)
+    n = len(ang)
+    if n < 3:
+        return DisparityTarget(0.0, 0.0, 0.0,
+                               np.asarray(ranges, dtype=float).copy())
+    ext = disparity_extend(ranges, ang, car_half_width, margin,
+                           disparity, geometry)
     # Break ties toward straight ahead. On an open stretch every beam reads
     # max range, every beam ties for furthest, and a bare argmax returns index
     # zero -- which is hard left. The feature would then tell a policy to turn
     # hard left on every straight, and the scripted gap-follower would do it.
     # Ties are the common case on a wide track, not an edge case.
-    best = ext.max()
+    best = float(ext.max())
     tied = np.flatnonzero(ext >= best - 1e-9)
-    return float(ang[tied[int(np.argmin(np.abs(ang[tied])))]])
+    j = int(tied[int(np.argmin(np.abs(ang[tied])))])
+    thr = gap_frac * best
+    lo = j
+    while lo > 0 and ext[lo - 1] >= thr:
+        lo -= 1
+    hi = j
+    while hi < n - 1 and ext[hi + 1] >= thr:
+        hi += 1
+    return DisparityTarget(float(ang[j]), best,
+                           abs(float(ang[hi] - ang[lo])), ext)
 
 
 class GapFollower:

@@ -113,7 +113,9 @@ class LaneKeep(Env):
                  lookahead=None, aim_feature: bool = False,
                  steer_mode: str = "absolute", steer_rate: float = 2.0,
                  drive_features: bool = False, proprio: bool = False,
-                 steer_feature: bool = False, factored_actions: bool = False,
+                 steer_feature: bool = False, de_features: str = "",
+                 de_cone_deg: float = 6.0, de_margin: float = 0.0,
+                 factored_actions: bool = False,
                  start_jitter: float = 0.3, seed: int | None = None):
         if action_mode not in ("discrete", "continuous"):
             raise ValueError("action_mode must be 'discrete' or 'continuous'")
@@ -175,12 +177,25 @@ class LaneKeep(Env):
         #: the angle it is holding. On the scuderia car this was worth 5/5
         #: seeds and 107 -> 149 m; it is the same feature here.
         self.steer_feature = bool(steer_feature)
+        #: Disparity-extender geometry; see `envs.track.de_features`. The
+        #: same letters mean the same thing here, on a 5 m scan rather than
+        #: a 10 m one, so `b` and `c` are normalised on this env's range.
+        from rtrrl_playground.envs.track import DE_LETTERS
+        bad = set(de_features or "") - set(DE_LETTERS)
+        if bad:
+            raise ValueError(
+                f"de_features got unknown letter(s) {sorted(bad)}; the six "
+                f"are {DE_LETTERS!r} -- see envs.track.de_features")
+        self.de_features = str(de_features or "")
+        self.de_cone_deg = float(de_cone_deg)
+        self.de_margin = float(de_margin)
         self.obs_dim = (self.n_beams + int(self.observe_speed)
                         + (0 if self.lookahead is None else len(self.lookahead))
                         + int(self.aim_feature)
                         + 3 * int(self.drive_features)
                         + 5 * int(self.proprio)
-                        + int(self.steer_feature))
+                        + int(self.steer_feature)
+                        + len(self.de_features))
         # A flat softmax over steer x accel rather than two heads: one
         # categorical distribution is one gradient to derive. The *resolution*
         # is `n_steer` x `n_accel`, defaulting to the 3 x 3 every result
@@ -222,6 +237,7 @@ class LaneKeep(Env):
         self._t = 0
         self._stalled = 0
         self._prev_vxy = None
+        self._de_prev = None
         self.history: list[dict] = []
 
     def _decode(self, action) -> tuple[float, float]:
@@ -269,6 +285,14 @@ class LaneKeep(Env):
         if self.steer_feature:
             # last, so turning it on does not move any existing feature
             parts.append(np.array([self.delta / self.vehicle.steer_max]))
+        if self.de_features:
+            from rtrrl_playground.envs.track import de_features as _def
+            f, th = _def(ranges, self.beam_angles, BEAM_RANGE,
+                         spec=self.de_features, cone_deg=self.de_cone_deg,
+                         prev_theta=self._de_prev, dt=self.dt,
+                         margin=self.de_margin)
+            self._de_prev = th
+            parts.append(f)
         self._last_beams = (ranges, flags)
         return np.concatenate(parts)
 

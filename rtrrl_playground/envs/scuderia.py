@@ -80,6 +80,10 @@ class ScuderiaLaneKeep(Env):
     corridor_feature = False
     _corridor_m = 6.0
     _corridor_gate = 0.0
+    de_features = ""
+    de_cone_deg = 6.0
+    de_margin = 0.0
+    _de_prev = None
 
     def __init__(self, model: str = "st", map_name: str = "berlin",
                  map_ext: str = ".png", tire_model: int | None = None,
@@ -106,6 +110,8 @@ class ScuderiaLaneKeep(Env):
                  corridor_lo: float = 3.0,
                  corridor_hi: float = 6.0,
                  corridor_feature: bool = False,
+                 de_features: str = "",
+                 de_cone_deg: float = 6.0, de_margin: float = 0.0,
                  accel_jerk_penalty: float = 0.0,
                  accel_max: float = 1.0, brake_max: float | None = None,
                  accel_mode: str = "ramp", accel_cmd: float = 10.0,
@@ -386,6 +392,26 @@ class ScuderiaLaneKeep(Env):
         self.corridor_feature = bool(corridor_feature)
         self._corridor_m = float(corridor_hi)
         self._corridor_gate = 0.0
+        #: Which of the six disparity-extender features to append, as a
+        #: subset of ``track.DE_LETTERS``. The extender itself is not new --
+        #: `free_space_heading` has driven on it since the start and
+        #: `aim_feature` publishes its heading -- but every number it
+        #: computes *besides* the heading was being thrown away. ``"b"``,
+        #: the length of the chosen straight, is the one the corridor work
+        #: needed: a gate on the minimum of a raw cone reads the side wall
+        #: wherever the corridor is narrower than the cone is wide, and
+        #: needs two thresholds in metres that have to be calibrated to
+        #: whichever driver produced the distribution.
+        from rtrrl_playground.envs.track import DE_LETTERS
+        bad = set(de_features or "") - set(DE_LETTERS)
+        if bad:
+            raise ValueError(
+                f"de_features got unknown letter(s) {sorted(bad)}; the six "
+                f"are {DE_LETTERS!r} -- see envs.track.de_features")
+        self.de_features = str(de_features or "")
+        self.de_cone_deg = float(de_cone_deg)
+        self.de_margin = float(de_margin)
+        self._de_prev = None
         self.obs_dim = (self.n_beams_out + int(observe_speed)
                         + (0 if self.lookahead is None else len(self.lookahead))
                         + int(self.aim_feature)
@@ -393,7 +419,8 @@ class ScuderiaLaneKeep(Env):
                         + 5 * int(self.proprio)
                         + int(self.grip_feature)
                         + int(self.steer_feature)
-                        + int(self.corridor_feature))
+                        + int(self.corridor_feature)
+                        + len(self.de_features))
         # one definition of what a discrete action means, shared with the
         # filters -- see `spaces.action_grid`
         self.action_grid = action_grid(n_steer, n_accel)
@@ -998,6 +1025,20 @@ class ScuderiaLaneKeep(Env):
             parts.append(np.array([np.clip(
                 (m_ - self.corridor_lo)
                 / max(self.corridor_hi - self.corridor_lo, 1e-9), 0.0, 1.0)]))
+        if self.de_features:
+            # Last again, for the same reason, and off the raw scan for the
+            # same reason `aim_feature` is: the car's lidar publishes 1080
+            # beams whatever the policy reads, so one scalar off all of them
+            # is what the ROS node would compute. `_de_prev` is None on the
+            # first step of an episode, which makes `d` and `e` read 0 rather
+            # than a jump against the last episode's heading.
+            from rtrrl_playground.envs.track import de_features as _def
+            f, th = _def(scans[0], self.scan_angles, BEAM_RANGE,
+                         spec=self.de_features, cone_deg=self.de_cone_deg,
+                         prev_theta=self._de_prev, dt=self.dt,
+                         margin=self.de_margin)
+            self._de_prev = th
+            parts.append(f)
         return np.concatenate(parts) if len(parts) > 1 else parts[0]
 
     def _reward(self, x: np.ndarray, x_prev: np.ndarray) -> float:
@@ -1102,6 +1143,7 @@ class ScuderiaLaneKeep(Env):
         self._steer_jerk = 0.0
         self._corridor_m = self.corridor_hi
         self._corridor_gate = 0.0
+        self._de_prev = None
         self._accel_cmd = 0.0
         self._accel_jerk = 0.0
         self._prev_vxy = None
