@@ -64,6 +64,22 @@ class ScuderiaLaneKeep(Env):
 
     id = "scuderia-lanekeep"
 
+    # Class-level defaults for the steering-jerk and corridor state. The unit
+    # tests build bare instances with `object.__new__` to avoid starting a
+    # simulator and loading a map, and every field added to `__init__` used to
+    # break every one of those helpers at once. Defining the defaults here
+    # means a bare instance behaves like an env with the knob switched off,
+    # which is also what an old pickled env would do.
+    steer_jerk_rate = None
+    _steer_rate_cmd = 0.0
+    _steer_jerk = 0.0
+    corridor_steer_penalty = 0.0
+    corridor_lo = 3.0
+    corridor_hi = 6.0
+    corridor_feature = False
+    _corridor_m = 6.0
+    _corridor_gate = 0.0
+
     def __init__(self, model: str = "st", map_name: str = "berlin",
                  map_ext: str = ".png", tire_model: int | None = None,
                  action_mode: str = "discrete",
@@ -83,6 +99,11 @@ class ScuderiaLaneKeep(Env):
                  reverse_penalty: float = 0.0,
                  steer_move_penalty: float = 0.0,
                  accel_rate: float | None = None,
+                 steer_jerk_rate: float | None = None,
+                 corridor_steer_penalty: float = 0.0,
+                 corridor_lo: float = 3.0,
+                 corridor_hi: float = 6.0,
+                 corridor_feature: bool = False,
                  accel_jerk_penalty: float = 0.0,
                  accel_max: float = 1.0, brake_max: float | None = None,
                  accel_mode: str = "ramp", accel_cmd: float = 10.0,
@@ -299,13 +320,59 @@ class ScuderiaLaneKeep(Env):
         #: crossing rate at 7-9 a second; this one does not ask it to learn.
         self.steer_filter = float(steer_filter)
         self._steer_out = 0.0
+        #: Jerk limit on the *rate* command, in rad/s^2 -- the steering
+        #: analogue of `accel_rate`, and until now the one axis with nothing
+        #: of the kind. `steer_rate` caps how fast the setpoint may move;
+        #: nothing capped how fast that rate may *change*, so the policy
+        #: could ask for +6 rad/s and then -6 rad/s on the next 50 ms tick,
+        #: and the traces show it doing exactly that. The acceleration axis
+        #: got its limit first and it is the only smoothing cost in this
+        #: project that did not cost distance.
+        #:
+        #: It belongs on the rate because in delta mode the rate *is* the
+        #: action; limiting the angle instead would just be `steer_rate`
+        #: again, which was tried at 4, 3 and 2 rad/s and either changed
+        #: nothing or stopped the car cornering.
+        self._check_steer_jerk(steer_jerk_rate, self.steer_mode)
+        self.steer_jerk_rate = (None if steer_jerk_rate is None
+                                else float(steer_jerk_rate))
+        self._steer_rate_cmd = 0.0
+        self._steer_jerk = 0.0
+        #: A price on moving the wheel, weighted by how long the corridor
+        #: ahead is: free in a hairpin, full price down a straight.
+        #:
+        #: Three unconditional prices on command magnitude have already
+        #: failed (reversal, CAPS, wheel travel), and the reason each failed
+        #: is that the car genuinely needs the whole lock in master_cup's
+        #: hairpins, so any cost big enough to quiet the straights is big
+        #: enough to stop it cornering. This one is conditional, and on a
+        #: quantity the car can measure: on a long straight the right rate
+        #: command is zero, so a policy that holds the wheel pays nothing.
+        #:
+        #: The gate is the minimum range in a +/-6 deg cone, in metres. That
+        #: cone and not the +/-12 deg one `drive_features` already publishes:
+        #: measured over 6,000 steps of master_cup, +/-6 deg separates
+        #: straights (R > 10 m) from corners (R < 3 m) with AUC 0.842 and
+        #: means of 5.30 m against 2.99, where +/-12 deg manages 0.745 and
+        #: 3.20 against 2.49. The wider cone subtends more than the corridor
+        #: is wide -- master_cup pinches to 0.37 m -- so its minimum reads
+        #: the side wall rather than the end of the straight.
+        self.corridor_steer_penalty = float(corridor_steer_penalty)
+        self.corridor_lo, self.corridor_hi = float(corridor_lo), float(corridor_hi)
+        #: The policy has to be able to see the gate or this is a price on
+        #: something unobservable, which is what `steer_feature` was added to
+        #: stop. Separate flag so the feature and the price can be told apart.
+        self.corridor_feature = bool(corridor_feature)
+        self._corridor_m = float(corridor_hi)
+        self._corridor_gate = 0.0
         self.obs_dim = (self.n_beams_out + int(observe_speed)
                         + (0 if self.lookahead is None else len(self.lookahead))
                         + int(self.aim_feature)
                         + 3 * int(self.drive_features)
                         + 5 * int(self.proprio)
                         + int(self.grip_feature)
-                        + int(self.steer_feature))
+                        + int(self.steer_feature)
+                        + int(self.corridor_feature))
         # one definition of what a discrete action means, shared with the
         # filters -- see `spaces.action_grid`
         self.action_grid = action_grid(n_steer, n_accel)
@@ -730,10 +797,26 @@ class ScuderiaLaneKeep(Env):
                                         0.0, SPEED_MAX))
         prev_steer = self._steer_cmd
         self._steer_move = abs(float(steer))
+        # Read here, not after the simulator runs: `self._scans` is still the
+        # scan the current observation was built from, so the gate charges
+        # against the corridor the policy actually saw when it chose this.
+        if self.corridor_steer_penalty or self.corridor_feature:
+            self._corridor_m = self._corridor_ahead()
+            self._corridor_gate = float(np.clip(
+                (self._corridor_m - self.corridor_lo)
+                / max(self.corridor_hi - self.corridor_lo, 1e-9), 0.0, 1.0))
         if self.steer_mode == "delta":
-            self._steer_cmd = float(np.clip(
-                self._steer_cmd + steer * self.steer_rate * self.dt,
-                -STEER_MAX, STEER_MAX))
+            u = float(steer) * self.steer_rate              # rad/s requested
+            if self.steer_jerk_rate is not None:
+                step_ = self.steer_jerk_rate * self.dt
+                u = float(np.clip(u, self._steer_rate_cmd - step_,
+                                  self._steer_rate_cmd + step_))
+            # on full scale, so the number means the same at any steer_rate
+            self._steer_jerk = (abs(u - self._steer_rate_cmd)
+                                / max(self.steer_rate, 1e-9))
+            self._steer_rate_cmd = u
+            self._steer_cmd = float(np.clip(self._steer_cmd + u * self.dt,
+                                            -STEER_MAX, STEER_MAX))
         else:
             self._steer_cmd = float(steer) * STEER_MAX
         # the wheel crossed centre and is now pointed the other way. Read off
@@ -746,6 +829,47 @@ class ScuderiaLaneKeep(Env):
             self._steer_out = (1.0 - a) * self._steer_out + a * self._steer_cmd
             return np.array([self._steer_out, self._v_cmd])
         return np.array([self._steer_cmd, self._v_cmd])
+
+    @staticmethod
+    def _check_steer_jerk(steer_jerk_rate, steer_mode) -> None:
+        if steer_jerk_rate is not None and steer_mode != "delta":
+            raise ValueError(
+                "steer_jerk_rate limits the change in a *rate* command and "
+                "only means something in steer_mode='delta'; in absolute "
+                "mode the action is an angle and the limit you want is "
+                "steer_rate. Refusing rather than ignoring it.")
+
+    def _corridor_ahead(self) -> float:
+        """How far the corridor runs ahead, in metres, from the raw scan.
+
+        The minimum of a +/-6 deg cone: the nearest thing the car would hit
+        going straight on, which is what "how long is this straight" means
+        to a vehicle. Taken from the full scan rather than the handful of
+        beams the policy is given, for the same reason `aim_feature` is --
+        the car's lidar publishes 1080 beams whatever the policy reads, so
+        one scalar off all of them is what the ROS node would compute.
+        """
+        if self._scans is None:
+            return self.corridor_hi
+        cone = np.abs(self.scan_angles) <= np.radians(6.0)
+        if not cone.any():
+            return self.corridor_hi
+        return float(np.min(self._scans[0][cone]))
+
+    @property
+    def steer_rate_command(self) -> float:
+        """The rate the wheel was actually given, after `steer_jerk_rate`.
+
+        Exposed because every acceleration number in this project was once
+        measured on the request while the env was quietly delivering
+        something else; the steering axis gets the accessor from the start.
+        """
+        return self._steer_rate_cmd
+
+    @property
+    def corridor_ahead(self) -> float:
+        """Metres of clear corridor straight ahead, as the gate reads it."""
+        return self._corridor_m
 
     def _pull(self, state):
         """Bring one step's worth of device arrays across, in two transfers.
@@ -834,6 +958,17 @@ class ScuderiaLaneKeep(Env):
             # only one of the two the car knows without a sensor.
             w = self._steer_out if self.steer_filter else self._steer_cmd
             parts.append(np.array([w / STEER_MAX]))
+        if self.corridor_feature:
+            # After `steer_feature`, so switching it on moves nothing that
+            # came before it. Normalised on the gate's own range rather than
+            # BEAM_RANGE: what the policy needs is where it sits between "a
+            # hairpin" and "a straight", and on this track those are 3 m and
+            # 6 m, not 0 and 10.
+            cone = np.abs(self.scan_angles) <= np.radians(6.0)
+            m_ = float(np.min(scans[0][cone])) if cone.any() else self.corridor_hi
+            parts.append(np.array([np.clip(
+                (m_ - self.corridor_lo)
+                / max(self.corridor_hi - self.corridor_lo, 1e-9), 0.0, 1.0)]))
         return np.concatenate(parts) if len(parts) > 1 else parts[0]
 
     def _reward(self, x: np.ndarray, x_prev: np.ndarray) -> float:
@@ -934,6 +1069,10 @@ class ScuderiaLaneKeep(Env):
         self._steer_cmd = 0.0
         self._steer_out = 0.0
         self._steer_move = 0.0
+        self._steer_rate_cmd = 0.0
+        self._steer_jerk = 0.0
+        self._corridor_m = self.corridor_hi
+        self._corridor_gate = 0.0
         self._accel_cmd = 0.0
         self._accel_jerk = 0.0
         self._prev_vxy = None
@@ -971,7 +1110,11 @@ class ScuderiaLaneKeep(Env):
                      if self.reverse_penalty and self._steer_flip else 0.0)
         r_ajerk = -self.accel_jerk_penalty * self._accel_jerk
         r_smove = -self.steer_move_penalty * self._steer_move
-        reward = r_progress + r_grip + r_reverse + r_ajerk + r_smove
+        # free in a hairpin, full price down a straight; see the note on
+        # `corridor_steer_penalty` for why the gate is not another flat cost
+        r_corr = (-self.corridor_steer_penalty * self._corridor_gate
+                  * self._steer_move)
+        reward = r_progress + r_grip + r_reverse + r_ajerk + r_smove + r_corr
         self._t += 1
         x = self._x[0]
         self.history.append(dict(x=float(x[0]), y=float(x[1]), psi=float(x[4]),
@@ -993,14 +1136,20 @@ class ScuderiaLaneKeep(Env):
                     {"crashed": bool(crashed), "off_track": off_track,
                      "lateral": lateral, "r_progress": 0.0, "r_grip": 0.0,
                      "r_reverse": 0.0, "r_accel_jerk": 0.0,
-                     "r_steer_move": 0.0, "r_crash": -1.0})
+                     "r_steer_move": 0.0, "r_corridor": 0.0,
+                     "r_crash": -1.0})
         truncated = self._t >= self.max_steps
         return (self._obs_from(self._x, self._scans), float(reward), False, truncated,
                 {"crashed": False, "off_track": False, "lateral": lateral,
                  "v": float(x[3]), "r_progress": float(r_progress),
                  "r_grip": float(r_grip), "r_reverse": float(r_reverse),
                  "r_accel_jerk": float(r_ajerk),
-                 "r_steer_move": float(r_smove), "r_crash": 0.0})
+                 "r_steer_move": float(r_smove),
+                 "r_corridor": float(r_corr),
+                 "corridor_m": float(self._corridor_m),
+                 "corridor_gate": float(self._corridor_gate),
+                 "steer_rate_cmd": float(self._steer_rate_cmd),
+                 "r_crash": 0.0})
 
     # -- pictures ----------------------------------------------------------
     def render_rollout(self, history=None, path: str = "rollout.png", title: str = ""):
