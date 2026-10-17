@@ -71,6 +71,7 @@ class ScuderiaLaneKeep(Env):
     # means a bare instance behaves like an env with the knob switched off,
     # which is also what an old pickled env would do.
     steer_jerk_rate = None
+    steer_jerk_corridor = False
     _steer_rate_cmd = 0.0
     _steer_jerk = 0.0
     corridor_steer_penalty = 0.0
@@ -100,6 +101,7 @@ class ScuderiaLaneKeep(Env):
                  steer_move_penalty: float = 0.0,
                  accel_rate: float | None = None,
                  steer_jerk_rate: float | None = None,
+                 steer_jerk_corridor: bool = False,
                  corridor_steer_penalty: float = 0.0,
                  corridor_lo: float = 3.0,
                  corridor_hi: float = 6.0,
@@ -336,6 +338,25 @@ class ScuderiaLaneKeep(Env):
         self._check_steer_jerk(steer_jerk_rate, self.steer_mode)
         self.steer_jerk_rate = (None if steer_jerk_rate is None
                                 else float(steer_jerk_rate))
+        #: Apply `steer_jerk_rate` in proportion to the corridor ahead:
+        #: the full limit down a straight, none of it in a hairpin.
+        #:
+        #: Measured, this is the reason a flat limit fails. The steering
+        #: jerk the policy asks for is the same in both places -- median
+        #: 144 rad/s^2 on a straight against 132 in a corner, above 30 on
+        #: 57 % of straight steps against 55 % of corner steps -- so a
+        #: single limit that quiets the straights also binds on more than
+        #: half of the corner commands, and at 30 rad/s^2 the car stopped
+        #: driving (149 m -> 16 m, 0/5 seeds). It is the same shape of
+        #: failure as the three prices: the quantity being limited does not
+        #: distinguish where the behaviour is wanted from where it is not.
+        #: The corridor does distinguish them, so it is what should decide
+        #: how hard the limit bites.
+        self.steer_jerk_corridor = bool(steer_jerk_corridor)
+        #: the largest jerk the action space can even ask for: full rate one
+        #: way to full rate the other in one tick. Used as "no limit" at the
+        #: open end of the gate, so the two ends interpolate in one unit.
+        self._jerk_unlimited = 2.0 * float(steer_rate) / max(float(self.dt), 1e-9)
         self._steer_rate_cmd = 0.0
         self._steer_jerk = 0.0
         #: A price on moving the wheel, weighted by how long the corridor
@@ -800,7 +821,8 @@ class ScuderiaLaneKeep(Env):
         # Read here, not after the simulator runs: `self._scans` is still the
         # scan the current observation was built from, so the gate charges
         # against the corridor the policy actually saw when it chose this.
-        if self.corridor_steer_penalty or self.corridor_feature:
+        if (self.corridor_steer_penalty or self.corridor_feature
+                or self.steer_jerk_corridor):
             self._corridor_m = self._corridor_ahead()
             self._corridor_gate = float(np.clip(
                 (self._corridor_m - self.corridor_lo)
@@ -808,7 +830,14 @@ class ScuderiaLaneKeep(Env):
         if self.steer_mode == "delta":
             u = float(steer) * self.steer_rate              # rad/s requested
             if self.steer_jerk_rate is not None:
-                step_ = self.steer_jerk_rate * self.dt
+                lim = self.steer_jerk_rate
+                if self.steer_jerk_corridor:
+                    # gate 1 (a straight) is the full limit, gate 0 (a
+                    # hairpin) is no limit at all
+                    free = getattr(self, "_jerk_unlimited",
+                                   2.0 * self.steer_rate / max(self.dt, 1e-9))
+                    lim = free + (lim - free) * self._corridor_gate
+                step_ = lim * self.dt
                 u = float(np.clip(u, self._steer_rate_cmd - step_,
                                   self._steer_rate_cmd + step_))
             # on full scale, so the number means the same at any steer_rate

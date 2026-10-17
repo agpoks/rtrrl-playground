@@ -216,3 +216,53 @@ def test_the_feature_is_the_gate_the_cost_uses(clear, want):
     obs = env._obs_from(np.zeros((1, 7)), env._scans)
     assert obs[-1] == pytest.approx(want)
     assert obs[-1] == pytest.approx(env._corridor_gate)
+
+
+# -------------------------------------------- the two knobs, composed
+# A flat jerk limit fails for the same reason the three prices did: the
+# steering jerk the policy asks for is the same on a straight as in a
+# corner (median 144 against 132 rad/s^2; above 30 on 57 % of straight
+# steps against 55 % of corner steps), so one limit cannot quiet the
+# straights without binding on more than half the cornering. The corridor
+# does tell the two apart, so it is what should decide how hard the limit
+# bites.
+
+def test_the_gated_limit_is_the_full_limit_down_a_straight():
+    env = _bare(steer_jerk_rate=30.0, clear=10.0)
+    env.steer_jerk_corridor = True
+    env._jerk_unlimited = 2.0 * env.steer_rate / env.dt
+    prev, worst = 0.0, 0.0
+    for level in (1.0, -1.0) * 20:
+        u = _rate(env, level)
+        worst = max(worst, abs(u - prev) / env.dt)
+        prev = u
+    assert env._corridor_gate == pytest.approx(1.0)
+    assert worst <= 30.0 + 1e-9
+
+
+def test_the_gated_limit_lets_go_in_a_hairpin():
+    """Where the car needs the whole lock, it must still get it in one tick."""
+    env = _bare(steer_jerk_rate=30.0, clear=2.0)
+    env.steer_jerk_corridor = True
+    env._jerk_unlimited = 2.0 * env.steer_rate / env.dt
+    assert _rate(env, +1.0) == pytest.approx(+6.0)
+    assert _rate(env, -1.0) == pytest.approx(-6.0)   # unbound, as before
+    assert env._corridor_gate == pytest.approx(0.0)
+
+
+def test_half_a_gate_is_half_way_between():
+    env = _bare(steer_jerk_rate=30.0, clear=4.5)      # gate 0.5
+    env.steer_jerk_corridor = True
+    env._jerk_unlimited = 2.0 * env.steer_rate / env.dt
+    free = env._jerk_unlimited
+    _rate(env, +1.0)
+    prev = env._steer_rate_cmd
+    u = _rate(env, -1.0)
+    assert abs(u - prev) / env.dt == pytest.approx(0.5 * (free + 30.0), rel=1e-6)
+
+
+def test_gating_is_off_unless_asked_for():
+    """The flat limit has to keep behaving exactly as the arm that ran."""
+    env = _bare(steer_jerk_rate=30.0, clear=10.0)
+    assert env.steer_jerk_corridor is False
+    assert _rate(env, +1.0) == pytest.approx(1.5)     # 30 * 0.05
