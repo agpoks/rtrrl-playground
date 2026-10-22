@@ -151,6 +151,7 @@ class RTRRL:
                  cell: str = "ctrnn", estimator: str = "rflo", feedback: str = "random",
                  head: str = "softmax", readout_tau: float = 0.0,
                  critic_update: str = "true-online", critic_lr_mode: str = "normalized",
+                 critic_decay: float = 0.0,
                  meta_inputs: bool = True, clip: float = 1.0,
                  reward_scale: float = 1.0, spike_threshold: float = 0.0,
                  trigger: str = "evidence", trigger_period: int = 0,
@@ -296,6 +297,13 @@ class RTRRL:
         self.lr_actor, self.lr_critic, self.lr_rnn = lr_actor, lr_critic, lr_rnn
         self.critic_update = critic_update
         self.critic_lr_mode = critic_lr_mode
+        #: Shrink the critic's gradient field on every parameter write.
+        #: `ValueHead` is linear -- ``V = theta . h + b`` -- so ``dV/dh`` *is*
+        #: ``theta[:-1]``, and bounding the field is bounding that vector.
+        #: This is the critic-side counterpart of CAPS: CAPS asks the actor
+        #: not to move the wheel, this asks the critic not to grow the signal
+        #: everything else is multiplied by.
+        self.critic_decay = float(critic_decay)
         self.n_params = self.cell.n_params + self.actor.n_params + self.critic.n_params
         self._zero_traces()
         self.stats: dict[str, float] = {}
@@ -434,7 +442,7 @@ class RTRRL:
 
         if self.trigger == "evidence" and self.spike_threshold <= 0.0:
             self.n_updates += 1
-            self.critic.theta += d_critic
+            self._write_critic(d_critic)
             if d_s is None:
                 self.actor.apply(d_a, d_b, 1.0)
             else:
@@ -459,7 +467,7 @@ class RTRRL:
                 self.n_updates += 1
                 self._potential = 0.0
                 self._since = 0
-                self.critic.theta += self._pend_critic
+                self._write_critic(self._pend_critic)
                 if self._pend_actor[2] is None:
                     self.actor.apply(self._pend_actor[0], self._pend_actor[1], 1.0)
                 else:
@@ -485,6 +493,24 @@ class RTRRL:
         if terminated or truncated:
             return None
         return self.a
+
+    def _write_critic(self, d) -> None:
+        """Apply a critic update, and shrink the field if a decay is set.
+
+        The decay is applied at the *write*, not every tick, so an
+        event-driven run shrinks the field only when it fires -- the same
+        rule CAPS follows, and the one the deferred-update thesis needs: a
+        run that writes a quarter of the time must not be regularised four
+        times as hard as one that writes every step.
+
+        ``theta[-1]`` is the bias and is deliberately left alone. It carries
+        the mean return, which is a level, not a field; decaying it would
+        pull every value estimate toward zero and show up as a bias in
+        ``delta`` rather than as a bound on the gradient.
+        """
+        self.critic.theta += d
+        if self.critic_decay:
+            self.critic.theta[:-1] *= 1.0 - self.critic_decay
 
     # -- supervised pretraining -------------------------------------------
     def imitate(self, obs, expert_action, reward: float, terminated: bool,
