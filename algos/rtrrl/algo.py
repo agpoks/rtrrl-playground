@@ -155,7 +155,8 @@ class RTRRL:
                  reward_scale: float = 1.0, spike_threshold: float = 0.0,
                  trigger: str = "evidence", trigger_period: int = 0,
                  trigger_prob: float = 0.0, accumulate: bool = True,
-                 sticky_prob: float = 0.0, seed: int = 0, **cell_kwargs):
+                 sticky_prob: float = 0.0, sigma_max: float = 1.0,
+                 sigma_init: float = 0.35, seed: int = 0, **cell_kwargs):
         if critic_update not in ("true-online", "paper", "accumulating"):
             raise ValueError("critic_update must be 'true-online', 'paper' or 'accumulating'")
         if critic_lr_mode not in ("normalized", "fixed"):
@@ -268,7 +269,15 @@ class RTRRL:
                             "head's per-level logits; it has no meaning for "
                             "head='ordinal', whose parameters are a location "
                             "and a width")
-                    self.actor = OrdinalGaussianHead(n_hidden, nvec, **head_kw)
+                    # The width's ceiling and its starting value are
+                    # the ordinal head's only knobs on spread -- it has no
+                    # entropy bonus. At the default 1.0 the policy may sit
+                    # across ~10 of 21 levels and pay nothing, which is where
+                    # 3 of 5 seeds parked. Passed only to this head, so no
+                    # softmax result moves.
+                    self.actor = OrdinalGaussianHead(
+                        n_hidden, nvec, sigma_max=sigma_max,
+                        sigma_init=sigma_init, **head_kw)
                 else:
                     self.actor = FactoredCategoricalHead(
                         n_hidden, nvec, smooth_t=smooth_t, smooth_s=smooth_s,
