@@ -151,7 +151,7 @@ class RTRRL:
                  cell: str = "ctrnn", estimator: str = "rflo", feedback: str = "random",
                  head: str = "softmax", readout_tau: float = 0.0,
                  critic_update: str = "true-online", critic_lr_mode: str = "normalized",
-                 critic_decay: float = 0.0,
+                 critic_decay: float = 0.0, actor_trust: float = 0.0,
                  meta_inputs: bool = True, clip: float = 1.0,
                  reward_scale: float = 1.0, spike_threshold: float = 0.0,
                  trigger: str = "evidence", trigger_period: int = 0,
@@ -213,6 +213,14 @@ class RTRRL:
         self._pend_rnn = None
         self.n_updates = 0
         self.n_gated_steps = 0
+        #: applied-actor-step bookkeeping, so a trust radius can be read off
+        #: the runs that did not have one and a run that has one can say how
+        #: often it actually bound -- the mistake the sigma ceiling made was
+        #: shipping a knob whose only diagnostic did not measure it
+        self.n_actor_writes = 0
+        self.n_actor_capped = 0
+        self.actor_step_sum = 0.0
+        self.actor_step_max = 0.0
         self.rng = np.random.default_rng(seed)
         self.action_space = action_space
         self.meta_inputs = bool(meta_inputs)
@@ -304,6 +312,15 @@ class RTRRL:
         #: not to move the wheel, this asks the critic not to grow the signal
         #: everything else is multiplied by.
         self.critic_decay = float(critic_decay)
+        #: Trust region: the largest norm one *applied* actor update may have.
+        #: `clip` already bounds the per-tick gradient, but a deferred run
+        #: releases the sum of however many ticks it waited, so the step the
+        #: policy actually takes is unbounded in exactly the branch this
+        #: project is about. Six penalties on what the car does with the
+        #: policy changed nothing; the two interventions that moved the
+        #: actor's own magnitude are the two that moved the driving, and this
+        #: bounds that magnitude directly instead of pricing its output.
+        self.actor_trust = float(actor_trust)
         self.n_params = self.cell.n_params + self.actor.n_params + self.critic.n_params
         self._zero_traces()
         self.stats: dict[str, float] = {}
@@ -443,10 +460,7 @@ class RTRRL:
         if self.trigger == "evidence" and self.spike_threshold <= 0.0:
             self.n_updates += 1
             self._write_critic(d_critic)
-            if d_s is None:
-                self.actor.apply(d_a, d_b, 1.0)
-            else:
-                self.actor.apply(d_a, d_b, d_s, 1.0)
+            self._write_actor(d_a, d_b, d_s)
             self.cell.apply(d_rnn, self.lr_rnn)
         else:
             self.n_gated_steps += 1
@@ -468,11 +482,7 @@ class RTRRL:
                 self._potential = 0.0
                 self._since = 0
                 self._write_critic(self._pend_critic)
-                if self._pend_actor[2] is None:
-                    self.actor.apply(self._pend_actor[0], self._pend_actor[1], 1.0)
-                else:
-                    self.actor.apply(self._pend_actor[0], self._pend_actor[1],
-                                     self._pend_actor[2], 1.0)
+                self._write_actor(*self._pend_actor)
                 self.cell.apply(self._pend_rnn, self.lr_rnn)
                 self._pend_critic = None
             elif not self.accumulate:
@@ -493,6 +503,35 @@ class RTRRL:
         if terminated or truncated:
             return None
         return self.a
+
+    def _write_actor(self, d_a, d_b, d_s=None) -> None:
+        """Apply an actor update, bounded in norm if a trust region is set.
+
+        One factor scales the location, the bias and (where the head has
+        them) the width parameters together: per-part scaling would change
+        the update's *direction* and not only its length, which is a
+        different intervention from the one being tested.
+
+        Like `_write_critic` this is the only path to `actor.apply` in the
+        learning loop, so the bound cannot be added to the immediate branch
+        and forgotten in the triggered one -- the branch that needs it most,
+        since that is the one that releases an accumulated jump.
+        """
+        parts = [d_a, d_b] + ([] if d_s is None else [d_s])
+        n = float(np.sqrt(sum(float(p.ravel() @ p.ravel()) for p in parts)))
+        self.n_actor_writes += 1
+        self.actor_step_sum += n
+        self.actor_step_max = max(self.actor_step_max, n)
+        if self.actor_trust > 0.0 and n > self.actor_trust:
+            self.n_actor_capped += 1
+            f = self.actor_trust / n
+            d_a, d_b = d_a * f, d_b * f
+            if d_s is not None:
+                d_s = d_s * f
+        if d_s is None:
+            self.actor.apply(d_a, d_b, 1.0)
+        else:
+            self.actor.apply(d_a, d_b, d_s, 1.0)
 
     def _write_critic(self, d) -> None:
         """Apply a critic update, and shrink the field if a decay is set.
