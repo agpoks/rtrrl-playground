@@ -213,10 +213,16 @@ class RTRRL:
         self._pend_rnn = None
         self.n_updates = 0
         self.n_gated_steps = 0
-        #: applied-actor-step bookkeeping, so a trust radius can be read off
-        #: the runs that did not have one and a run that has one can say how
+        #: Actor-step bookkeeping, so a trust radius can be read off the
+        #: runs that did not have one and a run that has one can say how
         #: often it actually bound -- the mistake the sigma ceiling made was
-        #: shipping a knob whose only diagnostic did not measure it
+        #: shipping a knob whose only diagnostic did not measure it.
+        #: `actor_step_sum` and `actor_step_max` are the norms the gradient
+        #: ASKED for, before any shortening: with `n_actor_capped` they give
+        #: the applied step too, and on their own they say how hard the
+        #: radius is pulling. Read as applied they look impossible -- a mean
+        #: of 0.0105 under a radius of 0.003 -- which is the first thing the
+        #: 0.003 arm printed.
         self.n_actor_writes = 0
         self.n_actor_capped = 0
         self.actor_step_sum = 0.0
@@ -518,6 +524,7 @@ class RTRRL:
         since that is the one that releases an accumulated jump.
         """
         parts = [d_a, d_b] + ([] if d_s is None else [d_s])
+        # the requested length, recorded before the radius touches it
         n = float(np.sqrt(sum(float(p.ravel() @ p.ravel()) for p in parts)))
         self.n_actor_writes += 1
         self.actor_step_sum += n
