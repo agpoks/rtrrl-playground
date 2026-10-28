@@ -115,7 +115,7 @@ class LaneKeep(Env):
                  drive_features: bool = False, proprio: bool = False,
                  steer_feature: bool = False, de_features: str = "",
                  de_cone_deg: float = 6.0, de_margin: float = 0.0,
-                 factored_actions: bool = False,
+                 factored_actions: bool = False, grip_patch=None,
                  start_jitter: float = 0.3, seed: int | None = None):
         if action_mode not in ("discrete", "continuous"):
             raise ValueError("action_mode must be 'discrete' or 'continuous'")
@@ -135,6 +135,25 @@ class LaneKeep(Env):
         # Set grip_range=(1.0, 1.0) to switch it off and get the reactive
         # version back.
         self.grip_range = (float(grip_range[0]), float(grip_range[1]))
+        # A stretch of road with different friction, as ``(s_start, s_end,
+        # factor)`` in metres of arc length, wrapping if ``s_end < s_start``.
+        # The episode's grip is multiplied by ``factor`` while the car is
+        # inside it, so the patch is a change to a surface the agent cannot
+        # see coming -- the same kind of thing ``grip_range`` already makes
+        # unobservable, but tied to a *place* rather than to an episode.
+        #
+        # It exists to ask a question correlation could not answer. Whether
+        # the learning trigger fires on the physics was previously asked by
+        # taking recorded drives and looking for writes in tight corners,
+        # which cannot separate "the corner demanded a correction" from "the
+        # car was about to leave the track there anyway" -- and when the
+        # crash run-up was removed the effect went with it. A patch is an
+        # intervention at a location and a time we choose, so the same
+        # corner can be measured with the surface changed and unchanged, and
+        # the geometry cancels.
+        self.grip_patch = (None if grip_patch is None else
+                           (float(grip_patch[0]), float(grip_patch[1]),
+                            float(grip_patch[2])))
         self.vehicle = vehicle or VehicleParams()
         self.dt = float(dt)
         self.max_steps = int(max_steps)
@@ -228,6 +247,12 @@ class LaneKeep(Env):
     # -- state ------------------------------------------------------------
     def _reset_state(self):
         self.grip = 1.0
+        #: The episode's draw, before the patch multiplies it. `self.grip` is
+        #: what the tyres have *here*; this is what they have on clean road,
+        #: and keeping them apart is what lets the patch be switched off
+        #: without touching the episode-to-episode variation.
+        self._base_grip = 1.0
+        self._on_patch = False
         self.x = self.y = self.psi = self.v = self.delta = 0.0
         # only meaningful under dynamics="dynamic"; zero otherwise so a
         # consumer reading them on the kinematic car gets a defined value
@@ -327,7 +352,8 @@ class LaneKeep(Env):
         self.delta = 0.0
         self._k = k
         self._s = float(self.track.s[k])
-        self.grip = float(self._rng.uniform(*self.grip_range))
+        self._base_grip = float(self._rng.uniform(*self.grip_range))
+        self.grip = self._grip_at(self._s)
         self._reset_extras()
         return self._obs()
 
@@ -482,8 +508,35 @@ class LaneKeep(Env):
         self.psi += psi_dot * self.dt
         self.yaw_rate = psi_dot
 
+    def in_patch(self, s: float | None = None) -> bool:
+        """Whether arc position ``s`` is on the low-grip stretch."""
+        if self.grip_patch is None:
+            return False
+        s0, s1, _ = self.grip_patch
+        s = self._s if s is None else s
+        s = float(s) % self.track.length
+        return s0 <= s < s1 if s0 <= s1 else (s >= s0 or s < s1)
+
+    def _grip_at(self, s: float) -> float:
+        return (self._base_grip * self.grip_patch[2] if self.in_patch(s)
+                else self._base_grip)
+
     def step(self, action):
         steer, throttle = self._decode(action)
+        #: Set from where the car *is*, before it moves. `_integrate` runs
+        #: ahead of the Frenet projection below, so `self._s` is still the
+        #: previous step's position -- which is the road this step is driven
+        #: on. Reading it after would give the car the grip of the metre it
+        #: has just arrived at.
+        self.grip = self._grip_at(self._s)
+        #: Recorded with the grip, not re-derived at the end of the step. The
+        #: projection below moves `self._s` forward, so asking `in_patch()`
+        #: after it answers for the metre the car arrived at while `self.grip`
+        #: came from the metre it set off from. At the patch edges those
+        #: disagree, and the disagreement lands exactly where the effect being
+        #: measured is -- a step driven on the patch would be counted as off
+        #: it, and the other way round.
+        self._on_patch = self.in_patch(self._s)
         self._integrate(steer, throttle)
         s, d, k = self.track.frenet(self.x, self.y, self._k, half=24)
         progress = self.track.ds_forward(s, self._s)
@@ -515,6 +568,7 @@ class LaneKeep(Env):
         truncated = bool(self._t >= self.max_steps and not terminated)
         obs = self._obs() if not terminated else np.zeros(self.obs_dim)
         info = {"s": s, "d": d, "v": self.v, "grip": self.grip,
+                "base_grip": self._base_grip, "in_patch": self._on_patch,
                 "off_track": off_track, "stalled": stalled, "laps": 0.0}
         return obs, float(reward), terminated, truncated, info
 
