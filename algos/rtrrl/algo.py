@@ -140,6 +140,10 @@ class RTRRL:
             # samples too, and the control would differ from the method in two
             # ways instead of one.
             return bool(self._trng.random() < self.trigger_prob)
+        #: `evidence` and `evidence-norm` share this line. They differ only in
+        #: what was added to the potential, which is where the normalisation
+        #: lives -- so the bar, the reset and the gap statistics are identical
+        #: and the two rules can be compared at one threshold.
         return self._potential >= self.spike_threshold
 
     def __init__(self, obs_dim: int, action_space, n_hidden: int = 32,
@@ -156,6 +160,7 @@ class RTRRL:
                  reward_scale: float = 1.0, spike_threshold: float = 0.0,
                  trigger: str = "evidence", trigger_period: int = 0,
                  trigger_prob: float = 0.0, accumulate: bool = True,
+                 trigger_scale_decay: float = 0.999,
                  sticky_prob: float = 0.0, sigma_max: float = 1.0,
                  sigma_init: float = 0.35, seed: int = 0, **cell_kwargs):
         if critic_update not in ("true-online", "paper", "accumulating"):
@@ -181,14 +186,40 @@ class RTRRL:
         #   evidence  integrate |delta| to spike_threshold (the method)
         #   periodic  fire every `trigger_period` steps    (CV of the gaps = 0)
         #   random    fire with probability `trigger_prob` (CV of the gaps ~ 1)
+        #   evidence-norm  integrate |delta| / scale(|delta|), see below
+        #
+        # Why `evidence-norm` exists. Every write consumes exactly
+        # `spike_threshold` of accumulated |delta|, so the write rate IS
+        # mean|delta| / spike_threshold -- an identity, not an estimate. The
+        # measured rate on the racing circuit climbs from 12 % to 35 % over a
+        # run at fixed threshold, which therefore says mean|delta| nearly
+        # tripled: |delta| scales with how much return is in play, and early in
+        # training a car that crashes at the first corner has almost none.
+        #
+        # So a fixed bar on raw |delta| measures the *level* of the signal and
+        # not its surprise, and that is measurable as a failure rather than a
+        # worry: `experiments/what_triggers_it.py` reports P(write | event) /
+        # P(write) of 0.97-1.05 for slipping and 0.91-1.20 for a corner tighter
+        # than the tyres can take. The rule cannot see either. The only thing
+        # it does see is leaving the track, at 2.2-6.4.
+        #
+        # Dividing by a running scale makes the accumulated quantity
+        # dimensionless -- "how big is this error against the errors we have
+        # been getting lately" -- so one bar means the same thing at every
+        # stage of training. It also gives the threshold an interpretation it
+        # did not have: |delta| / scale averages 1 per step, so the rate is
+        # about 1 / spike_threshold and the bar reads as "wait for this many
+        # average surprises". That is a quantity a second cell can be given
+        # unchanged, where the raw rule needs 8.0 for the LIF and 1.57 for the
+        # CT-RNN to write at the same rate.
         #
         # The two controls are matched to the evidence rule's *measured* rate,
         # so all three write the same number of times and differ only in when.
         # `accumulate=False` additionally discards the pending update instead of
         # applying it, which tests the other half of the claim -- that nothing
         # is lost while waiting, only deferred.
-        valid = ("evidence", "periodic", "random", "filter", "filter-or-evidence",
-                 "barrier", "barrier-or-evidence")
+        valid = ("evidence", "evidence-norm", "periodic", "random",
+                 "filter", "filter-or-evidence", "barrier", "barrier-or-evidence")
         if trigger not in valid:
             raise ValueError(f"trigger must be one of {valid}")
         self.trigger = trigger
@@ -208,6 +239,16 @@ class RTRRL:
         self._since = 0
         self.spike_threshold = float(spike_threshold)
         self._potential = 0.0
+        #: Running scale of |delta| for `evidence-norm`, and the step count
+        #: that de-biases it. The decay has to be slow against the thing it is
+        #: cancelling and fast against nothing else: the scale moves over tens
+        #: of thousands of steps, episodes last tens to hundreds, so a horizon
+        #: of ~1000 steps averages over several episodes and still leaves a
+        #: within-episode surprise standing proud of it. A scale that tracked
+        #: |delta| instantly would make every ratio 1 and the rule a clock.
+        self.trigger_scale_decay = float(trigger_scale_decay)
+        self._dscale = 0.0
+        self._dscale_n = 0
         self._pend_critic = None
         self._pend_actor = None
         self._pend_rnn = None
@@ -482,7 +523,21 @@ class RTRRL:
             if d_s is not None:
                 self._pend_actor[2] += d_s
             self._pend_rnn += d_rnn
-            self._potential += abs(float(delta))
+            a = abs(float(delta))
+            if self.trigger == "evidence-norm":
+                #: Bias-corrected EMA, as in Adam. An average that starts at
+                #: zero reads far too small for its first few hundred steps,
+                #: and dividing by it would fire on every one of them.
+                d = self.trigger_scale_decay
+                self._dscale += (1.0 - d) * (a - self._dscale)
+                self._dscale_n += 1
+                scale = self._dscale / (1.0 - d ** self._dscale_n)
+                #: The ratio is deliberately not capped. One outlying error
+                #: releasing a write on its own is the behaviour being asked
+                #: for, not a numerical accident to be clipped away.
+                self._potential += a / max(scale, 1e-12)
+            else:
+                self._potential += a
             if self._fires():
                 self.n_updates += 1
                 self._potential = 0.0
@@ -505,7 +560,12 @@ class RTRRL:
                 "post_update, or clip=0. Lower --lr-rnn first.")
         self.a, self.cache = self.actor.act(self.h, self.rng)
         self.stats = {"delta": float(delta), "value": float(v_now),
-                      "entropy": self.actor.entropy(self.cache)}
+                      "entropy": self.actor.entropy(self.cache),
+                      #: What the trigger is actually integrating, so a
+                      #: recording can show the normalised surprise rather
+                      #: than only the write it produced.
+                      "delta_scale": float(self._dscale),
+                      "potential": float(self._potential)}
         if terminated or truncated:
             return None
         return self.a
