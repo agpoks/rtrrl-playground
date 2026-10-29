@@ -144,7 +144,43 @@ class RTRRL:
         #: what was added to the potential, which is where the normalisation
         #: lives -- so the bar, the reset and the gap statistics are identical
         #: and the two rules can be compared at one threshold.
-        return self._potential >= self.spike_threshold
+        #:
+        #: `evidence-warm` is the exception, because it changes units halfway:
+        #: raw |delta| against `spike_threshold` while the critic is still
+        #: uninformed, |delta|/scale against `trigger_norm_threshold` after.
+        #: One bar cannot serve both -- 8.0 on the raw rule and 8.0 on the
+        #: normalised one are a 34 % write rate and an 11 % one.
+        return self._potential >= self._bar()
+
+    def _bar(self) -> float:
+        """The threshold in the units the potential is currently carrying."""
+        if (self.trigger == "evidence-warm" and self._normalising()
+                and self.trigger_norm_threshold):
+            return self.trigger_norm_threshold
+        return self.spike_threshold
+
+    def _normalising(self) -> bool:
+        """Whether this step accumulates |delta| / scale rather than |delta|.
+
+        Why `evidence-warm` exists. The raw rule's write rate is not constant
+        -- it runs from about 12 % to 35 % across a run, because the rate *is*
+        mean|delta|/vartheta and mean|delta| grows with the return in play.
+        Normalising that away is what `evidence-norm` does, and on the racing
+        circuit it costs the retention result outright: the share of probes
+        that drove falls from 10.0 % to 5.6 % and the gap against the dense
+        baseline goes from p = 0.0039 to p = 0.39.
+
+        The measured reason is that the drift is an implicit warm-up. At the
+        first probe the raw rule writes on 11.6 % of steps and the normalised
+        on 29.6 %, so normalising more than doubles early writing against a
+        critic that knows nothing yet, and the critic inflates rather than
+        converges. This rule keeps the warm-up and normalises only after it,
+        which is the test of whether that is the whole story.
+        """
+        if self.trigger == "evidence-norm":
+            return True
+        return (self.trigger == "evidence-warm"
+                and self._dscale_n > self.trigger_warmup)
 
     def __init__(self, obs_dim: int, action_space, n_hidden: int = 32,
                  gamma: float = 0.99, lam_actor: float = 0.9, lam_critic: float = 0.9,
@@ -161,6 +197,8 @@ class RTRRL:
                  trigger: str = "evidence", trigger_period: int = 0,
                  trigger_prob: float = 0.0, accumulate: bool = True,
                  trigger_scale_decay: float = 0.999,
+                 trigger_warmup: int = 0,
+                 trigger_norm_threshold: float = 0.0,
                  sticky_prob: float = 0.0, sigma_max: float = 1.0,
                  sigma_init: float = 0.35, seed: int = 0, **cell_kwargs):
         if critic_update not in ("true-online", "paper", "accumulating"):
@@ -218,8 +256,9 @@ class RTRRL:
         # `accumulate=False` additionally discards the pending update instead of
         # applying it, which tests the other half of the claim -- that nothing
         # is lost while waiting, only deferred.
-        valid = ("evidence", "evidence-norm", "periodic", "random",
-                 "filter", "filter-or-evidence", "barrier", "barrier-or-evidence")
+        valid = ("evidence", "evidence-norm", "evidence-warm", "periodic",
+                 "random", "filter", "filter-or-evidence", "barrier",
+                 "barrier-or-evidence")
         if trigger not in valid:
             raise ValueError(f"trigger must be one of {valid}")
         self.trigger = trigger
@@ -247,6 +286,11 @@ class RTRRL:
         #: within-episode surprise standing proud of it. A scale that tracked
         #: |delta| instantly would make every ratio 1 and the rule a clock.
         self.trigger_scale_decay = float(trigger_scale_decay)
+        #: `evidence-warm` only: how many steps of raw accumulation come
+        #: before the switch, and the bar that applies after it.
+        self.trigger_warmup = int(trigger_warmup)
+        self.trigger_norm_threshold = float(trigger_norm_threshold)
+        self._switched = False
         self._dscale = 0.0
         self._dscale_n = 0
         self._pend_critic = None
@@ -524,18 +568,37 @@ class RTRRL:
                 self._pend_actor[2] += d_s
             self._pend_rnn += d_rnn
             a = abs(float(delta))
-            if self.trigger == "evidence-norm":
+            if self.trigger in ("evidence-norm", "evidence-warm"):
                 #: Bias-corrected EMA, as in Adam. An average that starts at
                 #: zero reads far too small for its first few hundred steps,
                 #: and dividing by it would fire on every one of them.
+                #:
+                #: Tracked through `evidence-warm`'s warm-up as well as after
+                #: it. An EMA started at the switch would be an average of one
+                #: sample and would fire on every step for the next few
+                #: hundred -- the exact failure the bias correction is here to
+                #: prevent, reintroduced by starting late.
                 d = self.trigger_scale_decay
                 self._dscale += (1.0 - d) * (a - self._dscale)
                 self._dscale_n += 1
                 scale = self._dscale / (1.0 - d ** self._dscale_n)
-                #: The ratio is deliberately not capped. One outlying error
-                #: releasing a write on its own is the behaviour being asked
-                #: for, not a numerical accident to be clipped away.
-                self._potential += a / max(scale, 1e-12)
+                if self._normalising():
+                    #: Carry the potential across the change of units, so the
+                    #: switch does not land a write for free on a partly full
+                    #: accumulator that is suddenly measured against a smaller
+                    #: bar. What is preserved is the fraction of the way to
+                    #: firing, which is the only scale-free thing about it.
+                    if self.trigger == "evidence-warm" and not self._switched:
+                        self._switched = True
+                        if self.spike_threshold > 0:
+                            self._potential *= (self._bar()
+                                                / self.spike_threshold)
+                    #: The ratio is deliberately not capped. One outlying error
+                    #: releasing a write on its own is the behaviour being
+                    #: asked for, not a numerical accident to be clipped away.
+                    self._potential += a / max(scale, 1e-12)
+                else:
+                    self._potential += a
             else:
                 self._potential += a
             if self._fires():
