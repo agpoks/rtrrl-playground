@@ -34,6 +34,7 @@ def _bare(steer_jerk_rate=None, corridor_steer_penalty=0.0,
           corridor_feature=False, corridor_lo=3.0, corridor_hi=6.0,
           steer_mode="delta", steer_rate=6.0, dt=0.05, clear=10.0):
     env = object.__new__(ScuderiaLaneKeep)
+    env.sensors = ""          # the car's own sensors, off
     env._idx = np.array([0, 1, 2])
     env.observe_speed = env.aim_feature = env.drive_features = False
     env.proprio = env.grip_feature = env.steer_feature = False

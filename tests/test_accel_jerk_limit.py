@@ -21,6 +21,7 @@ from rtrrl_playground.envs.scuderia import ScuderiaLaneKeep, STEER_MAX
 
 def _bare(accel_rate, dt=0.05, accel_cmd=10.0):
     env = object.__new__(ScuderiaLaneKeep)
+    env.sensors = ""          # the car's own sensors, off
     env.action_mode = "continuous"
     env.accel_mode = "accl"
     env.accel_cmd = accel_cmd

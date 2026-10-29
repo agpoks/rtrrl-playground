@@ -385,6 +385,7 @@ def test_the_scuderia_adapter_appends_it_too():
     """On a bare instance: the real constructor starts a simulator."""
     from rtrrl_playground.envs.scuderia import ScuderiaLaneKeep, BEAM_RANGE
     env = object.__new__(ScuderiaLaneKeep)
+    env.sensors = ""          # the car's own sensors, off
     env._idx = np.array([0, 90, 180])
     env.observe_speed = env.aim_feature = env.drive_features = False
     env.proprio = env.grip_feature = env.steer_feature = False

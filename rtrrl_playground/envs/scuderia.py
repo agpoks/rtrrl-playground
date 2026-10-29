@@ -60,6 +60,33 @@ SPEED_MAX = 4.0  # m/s
 N_BEAMS_OUT = 9
 BEAM_RANGE = 10.0
 
+#: One reference scale per unit for the sensor block, so every channel the
+#: policy reads is O(1) and no single one dominates the input weights.
+#: ``IMU_A_REF`` is a little above the 1.1 g the measured tyres can deliver,
+#: ``GYRO_REF`` is the yaw rate of this car at full lock and 2.5 m/s
+#: (``v tan(delta) / wheelbase`` = 2.5 * 0.42 / 0.33), and ``CURRENT_REF`` is
+#: the largest motor current in the bag this project calibrates against
+#: (``ICRA26_01062026_TRACK_2_1002``, ``/sensors/core current_motor``: median
+#: 2.7 A, p90 7.2 A, p99 13.3 A, max 20.7 A). The VESC's own ``I_max`` is
+#: 100 A and normalising on it would put every real current inside 20 % of
+#: zero.
+IMU_A_REF = 10.0      # m/s^2
+GYRO_REF = 3.0        # rad/s
+CURRENT_REF = 20.0    # A
+
+#: The letters ``ScuderiaLaneKeep.sensors`` accepts, in the order the channels
+#: are emitted. Fixed order, so ``"wi"`` and ``"iw"`` build the same vector and
+#: a checkpoint's feature indices do not depend on how the flag was typed.
+SENSOR_LETTERS = "iowscp"
+
+#: How many wheel-speed states each vehicle model carries, which is what
+#: decides whether the VESC's wheel channels exist at all. ``std`` integrates
+#: one wheel per axle and ``std4w`` one per corner; the single-track models
+#: stop at ``[x, y, delta, v, psi, r, beta]`` and have no wheel state, so
+#: there is nothing for ``w`` or ``s`` to read. See
+#: ``scuderia_gym_jax.envs.dynamic_models``' table.
+WHEEL_STATES = {"ks": 0, "st_linear": 0, "st": 0, "std": 2, "std4w": 4}
+
 
 class ScuderiaLaneKeep(Env):
     """Drive a ``scuderia_gym_jax`` car on one of its shipped maps."""
@@ -115,6 +142,7 @@ class ScuderiaLaneKeep(Env):
                  corridor_feature: bool = False,
                  de_features: str = "",
                  de_cone_deg: float = 6.0, de_margin: float = 0.0,
+                 sensors: str = "",
                  accel_jerk_penalty: float = 0.0,
                  accel_max: float = 1.0, brake_max: float | None = None,
                  accel_mode: str = "ramp", accel_cmd: float = 10.0,
@@ -439,6 +467,114 @@ class ScuderiaLaneKeep(Env):
         self.de_cone_deg = float(de_cone_deg)
         self.de_margin = float(de_margin)
         self._de_prev = None
+        #: Every channel the car's own sensors publish, as a letter set.
+        #:
+        #: Worth being blunt about what the published runs here actually read:
+        #: **nine lidar beams and a map**, and nothing else. The IMU, the VESC
+        #: and the servo are all wired into the simulator and none of them
+        #: reaches the policy -- ``proprio`` is the one partial exception and
+        #: is off in every result file this project has produced. These letters
+        #: close that gap, and each names a topic that exists on car21 rather
+        #: than a simulator state that does not:
+        #:
+        #: =====  =======================  ==================================
+        #: ``i``  IMU, 3 ch                ``/sensors/imu``
+        #: ``o``  VESC odometry, 2 ch      ``/odom`` + the servo
+        #: ``w``  wheel speeds, 2 or 4 ch  ``/sensors/core`` ERPM
+        #: ``s``  slip ratio, 2 or 4 ch    ``/sensors/core`` + ``/odom``
+        #: ``c``  motor current, 1 ch      ``/commands/motor/current``
+        #: ``p``  pose error, 2 ch         ``/pf/pose/odom`` + the survey
+        #: =====  =======================  ==================================
+        #:
+        #: ``i`` -- ``imu_ax``, ``imu_ay``, yaw rate. The accelerations are the
+        #: simulator's *modelled accelerometer*, ``a + bias + sigma * noise``,
+        #: which is the point: ``proprio`` finite-differences a clean velocity
+        #: instead and so trains the policy on a signal the car cannot produce.
+        #: The sigmas default to 0, so turning the letter on changes nothing
+        #: until ``imu_sigma_ax`` / ``imu_bias_ax`` are set, and then it
+        #: changes exactly what a real IMU would. The yaw rate is the gyro's
+        #: z axis, read straight from the state because that is what the gyro
+        #: measures. The other three IMU axes are deliberately absent: this is
+        #: a planar model, so ``az`` is a constant -g and the roll and pitch
+        #: rates are identically zero. Feeding the policy three constants is
+        #: not more sensing, and on the car they are three channels of noise.
+        #:
+        #: ``o`` -- the body speed and the steered-wheel angle. Both are
+        #: measurements on the car: the speed is ERPM through
+        #: ``speed_to_erpm_gain`` = 3014 and arrives on ``/odom``'s body-frame
+        #: twist, and the angle is where the servo has got to (``x[2]``), not
+        #: where it was told to go -- which is ``steer_feature``, a separate
+        #: and cheaper channel. ``sensors="io"`` is ``proprio``'s five numbers
+        #: with the IMU model in place of the finite difference.
+        #:
+        #: ``w`` -- one surface speed per modelled wheel, ``R_w * omega``. The
+        #: only genuinely *new* measurement in this list: the wheels can turn
+        #: at a different speed from the ground under them, and that difference
+        #: is invisible in every other channel.
+        #:
+        #: ``s`` -- the longitudinal slip ratio per wheel,
+        #: ``R_w omega / u_w - 1``, on the same guard the tyre model itself
+        #: uses. This is what ``w`` exists to give: it is zero when the car is
+        #: rolling, positive under wheelspin and negative under braking, and
+        #: it is the one signal that says *the surface changed* without a map,
+        #: an estimator or a lap of experience. A friction patch is a step in
+        #: this channel before it is anything else.
+        #:
+        #: ``c`` -- the motor current the drivetrain is being asked for,
+        #: ``m R_w a / K_tG`` with the simulator's own constants (4.251 kg,
+        #: 0.031 m, 0.014 N m/A, so 9.4 A per m/s^2). Taken from
+        #: ``accel_command``, the *jerk-limited* command, not the action: with
+        #: ``accel_rate`` in force and the speed envelope clipping the rest,
+        #: the two are different signals, and the one the car acts on is this
+        #: one. On the car the same number comes back measured on
+        #: ``/sensors/core``, and the difference between asked and measured is
+        #: the VESC PID's tracking error.
+        #:
+        #: ``p`` -- signed lateral offset as a fraction of the local corridor
+        #: half-width, and the heading error against the centreline tangent.
+        #: This is the particle filter's contribution stated out loud. The
+        #: ``lookahead`` features already depend on the filter and the surveyed
+        #: centreline and the paper has never said so; these two channels are
+        #: the part of that pose the lookahead throws away, namely where the
+        #: car is *now* rather than where the track goes next.
+        #:
+        #: Appended after every existing feature, so switching any of this on
+        #: moves nothing that came before it and a saved policy's indices keep
+        #: meaning what they meant.
+        bad = set(sensors or "") - set(SENSOR_LETTERS)
+        if bad:
+            raise ValueError(
+                f"sensors got unknown letter(s) {sorted(bad)}; the six are "
+                f"{SENSOR_LETTERS!r} -- see ScuderiaLaneKeep.sensors")
+        self.sensors = "".join(c for c in SENSOR_LETTERS
+                               if c in (sensors or ""))
+        self._n_wheel = WHEEL_STATES.get(self.model, 0)
+        if ("w" in self.sensors or "s" in self.sensors) and not self._n_wheel:
+            raise ValueError(
+                f"sensors={self.sensors!r} asks for wheel speeds, but "
+                f"model={self.model!r} carries no wheel state to read them "
+                f"from -- the single-track models stop at "
+                f"[x, y, delta, v, psi, r, beta]. Use model='std' (one wheel "
+                f"per axle) or model='std4w' (one per corner).")
+        # Read from the running simulator rather than restated here: these are
+        # the constants the dynamics are actually integrating, and a sensor
+        # model calibrated against a different wheel radius is a sensor model
+        # that disagrees with the car it is bolted to.
+        _veh = np.asarray(self.env.params.veh).ravel()
+        self._mass, self._R_w, self._K_tG = (float(_veh[3]), float(_veh[13]),
+                                             float(_veh[20]))
+        self._lf, self._lr = float(_veh[0]), float(_veh[1])
+        if self._n_wheel == 4:
+            _v4 = np.asarray(self.env.params.veh4).ravel()
+            self._t_f, self._t_r = float(_v4[25]), float(_v4[26])
+        else:
+            self._t_f = self._t_r = 0.0
+        # the same floor `vehicle_dynamics_std` divides the slip ratio by,
+        # `blend[2]`, so this channel is singular exactly where the tyre
+        # model is and nowhere else
+        self._v_min = float(np.asarray(self.env.params.blend).ravel()[2])
+        #: Last read of the modelled accelerometer, filled by ``_pull``.
+        self._imu = (0.0, 0.0)
         self.obs_dim = (self.n_beams_out + int(observe_speed)
                         + (0 if self.lookahead is None else len(self.lookahead))
                         + int(self.aim_feature)
@@ -447,7 +583,8 @@ class ScuderiaLaneKeep(Env):
                         + int(self.grip_feature)
                         + int(self.steer_feature)
                         + int(self.corridor_feature)
-                        + len(self.de_features))
+                        + len(self.de_features)
+                        + self.n_sensor_channels)
         # one definition of what a discrete action means, shared with the
         # filters -- see `spaces.action_grid`
         self.action_grid = action_grid(n_steer, n_accel)
@@ -514,6 +651,19 @@ class ScuderiaLaneKeep(Env):
         # training rather than for geometry: starting at 1.3 and annealing to
         # 1.0 gives a policy room to recover early without ever changing the
         # track the numbers are reported against. It does not move the walls.
+        if "c" in self.sensors and self.accel_mode != "accl":
+            raise ValueError(
+                f"sensors='c' is the motor current, which is the commanded "
+                f"acceleration times m R_w / K_tG, and accel_mode="
+                f"{self.accel_mode!r} commands a *speed setpoint* instead -- "
+                f"there is no acceleration to convert, and the channel would "
+                f"read a constant zero. Use accel_mode='accl', or drop the "
+                f"letter.")
+        if "p" in self.sensors and self.centreline is None:
+            raise ValueError(
+                "sensors='p' is the particle filter's pose read against the "
+                "surveyed centreline, and this environment was built without "
+                "one: pass centreline=(N, 2) metres, or drop the letter.")
         if lookahead is not None and self.centreline is None:
             raise ValueError(
                 "lookahead needs a centreline to look along: pass "
@@ -986,6 +1136,15 @@ class ScuderiaLaneKeep(Env):
         expensive thing in this adapter. Pull the whole array once, index the
         NumPy copy afterwards.
         """
+        if "i" in self.sensors:
+            # A third transfer, and only when the IMU is actually read. These
+            # are two scalars rather than two arrays, which is why they are
+            # pulled here instead of being derived in `_obs_from`: the
+            # accelerometer is a *state field*, not a function of `x`, and
+            # recomputing it from velocities is exactly the shortcut that
+            # makes `proprio` untransferable.
+            self._imu = (float(np.asarray(state.imu_ax)[0]),
+                         float(np.asarray(state.imu_ay)[0]))
         return np.asarray(state.x), np.asarray(state.scans)
 
     def _obs_from(self, x: np.ndarray, scans: np.ndarray) -> np.ndarray:
@@ -1089,7 +1248,204 @@ class ScuderiaLaneKeep(Env):
                          margin=self.de_margin)
             self._de_prev = th
             parts.append(f)
+        if self.sensors:
+            # Truly last: everything above is a lidar or map feature whose
+            # index some figure, checkpoint or docstring already quotes.
+            parts.append(self._sensor_obs(x))
         return np.concatenate(parts) if len(parts) > 1 else parts[0]
+
+    @property
+    def n_sensor_channels(self) -> int:
+        """How wide the ``sensors`` block is, given the model's wheel count."""
+        per = dict(i=3, o=2, w=self._n_wheel, s=self._n_wheel, c=1, p=2)
+        return sum(per[c] for c in self.sensors)
+
+    def _sensor_obs(self, x: np.ndarray) -> np.ndarray:
+        """The ``sensors`` channels, in ``SENSOR_LETTERS`` order.
+
+        One scale per unit (``IMU_A_REF``, ``GYRO_REF``, ``SPEED_MAX``,
+        ``STEER_MAX``, ``CURRENT_REF``) rather than a learned normaliser: the
+        learner here writes into a recurrent cell online and a running
+        normaliser would make the same observation mean different things at
+        different points in the run, which is the one thing a *replayed*
+        checkpoint cannot survive.
+        """
+        xx = x[0]
+        v, delta, r_, beta = (float(xx[3]), float(xx[2]), float(xx[5]),
+                              float(xx[6]))
+        out: list[float] = []
+        for ch in self.sensors:
+            if ch == "i":
+                ax, ay = self._imu
+                out += [float(np.clip(ax / IMU_A_REF, -1.0, 1.0)),
+                        float(np.clip(ay / IMU_A_REF, -1.0, 1.0)),
+                        float(np.clip(r_ / GYRO_REF, -1.0, 1.0))]
+            elif ch == "o":
+                out += [v / SPEED_MAX, delta / STEER_MAX]
+            elif ch == "w":
+                w = np.asarray(xx[7:7 + self._n_wheel], dtype=float)
+                out += list(np.clip(self._R_w * w / SPEED_MAX, 0.0, 2.0))
+            elif ch == "s":
+                out += list(self._slip(xx))
+            elif ch == "c":
+                # T_wheel = K_tG * I and T = m R_w a (the simulator's own
+                # `_drive_torques_from_u1`), so I = m R_w a / K_tG
+                i_a = self._mass * self._R_w * self._accel_cmd / self._K_tG
+                out.append(float(np.clip(i_a / CURRENT_REF, -1.0, 1.0)))
+            elif ch == "p":
+                out += list(self._pose_error())
+        return np.asarray(out, dtype=float)
+
+    def _slip(self, xx: np.ndarray) -> np.ndarray:
+        """Longitudinal slip ratio per wheel, as the tyre model computes it.
+
+        ``R_w omega / u_w - 1``, where ``u_w`` is the **wheel-centre**
+        longitudinal velocity, not the body speed: the front wheel is steered
+        and offset from the centre of gravity, so its own longitudinal axis
+        sees ``vx cos(delta) + (vy + l_f r) sin(delta)``, and a four-wheel
+        model additionally splits the yaw rate across the track width. Reading
+        the body speed for all of them instead -- which is the obvious
+        shortcut, and the one this first did -- puts a standing offset of about
+        0.02 on the front channel whenever the car is turning, i.e. a
+        cornering artefact in a channel whose whole job is to report wheelspin.
+        Copied from ``_compute_std_forces`` and ``_compute_std4w_forces`` so
+        the policy reads the same number the tyres are standing on.
+
+        CommonRoad's sign convention, which the simulator keeps: **positive is
+        braking, negative is driving.** Zero while rolling, and zero rather
+        than -1 at a standstill, because the model's own ``v > v_min`` guard
+        says a stopped wheel is not slipping.
+        """
+        v, delta, r_, beta = (float(xx[3]), float(xx[2]), float(xx[5]),
+                              float(xx[6]))
+        w = np.asarray(xx[7:7 + self._n_wheel], dtype=float)
+        vx, vy = v * np.cos(beta), v * np.sin(beta)
+        cd, sd = np.cos(delta), np.sin(delta)
+        if self._n_wheel == 2:
+            u_w = np.array([max(0.0, vx * cd + (vy + self._lf * r_) * sd),
+                            max(0.0, vx)])
+        else:
+            b_f, b_r = self._t_f * 0.5, self._t_r * 0.5
+            vx_c = np.array([vx - r_ * b_f, vx + r_ * b_f,
+                             vx - r_ * b_r, vx + r_ * b_r])
+            vy_c = np.array([vy + r_ * self._lf, vy + r_ * self._lf,
+                             vy - r_ * self._lr, vy - r_ * self._lr])
+            u_w = np.maximum(0.0, np.array([
+                vx_c[0] * cd + vy_c[0] * sd, vx_c[1] * cd + vy_c[1] * sd,
+                vx_c[2], vx_c[3]]))
+        s = self._R_w * w / np.maximum(u_w, self._v_min) - 1.0
+        return np.clip(np.where(v > self._v_min, s, 0.0), -1.0, 1.0)
+
+    def _pose_error(self) -> tuple[float, float]:
+        """``(signed lateral / half-width, heading error / (pi/2))``.
+
+        What a particle filter and a surveyed centreline give that the lidar
+        cannot: not how far the walls are, but where on the track the car is.
+        Positive lateral is left of the centreline. Normalised on the *local*
+        half-width rather than a constant, because this corridor runs from
+        0.37 m to 1.59 m and a fixed scale would make 1.0 mean "off the road"
+        in a hairpin and "comfortable" on the back straight.
+        """
+        from rtrrl_playground.envs.track import HEADING_SCALE
+        xx = self._x[0]
+        _s, lateral, k = self._nearest(xx[:2])
+        cx, cy, cpsi = self._pose_at(k)
+        side = np.sign(np.cos(cpsi) * (float(xx[1]) - cy)
+                       - np.sin(cpsi) * (float(xx[0]) - cx))
+        err = float(xx[4]) - cpsi
+        err = (err + np.pi) % (2.0 * np.pi) - np.pi
+        return (float(np.clip(side * lateral / max(self._limit_at(k), 1e-6),
+                              -1.0, 1.0)),
+                float(np.clip(err / HEADING_SCALE, -1.0, 1.0)))
+
+    @property
+    def obs_labels(self) -> list[dict]:
+        """One row per observation channel: name, sensor, topic, units, scale.
+
+        The observation vector is assembled by a dozen independent ``if``
+        blocks whose order is load-bearing and recorded only in comments. That
+        is fine for the env and useless for everything else: a paper has to
+        state what the policy reads, a figure has to label an axis, and a
+        checkpoint loaded into a differently-configured env has to be refused
+        rather than quietly fed the wrong column. This is the one place that
+        order is written down as data, and it is generated from the same flags
+        the vector is, so the two cannot drift apart.
+        """
+        from rtrrl_playground.envs.track import HEADING_SCALE
+        L = lambda n, s, t, u, sc, g: dict(  # noqa: E731
+            name=n, sensor=s, topic=t, units=u, scale=sc, group=g)
+        rows = [L(f"beam[{i}]", "lidar", "/scan", "m", BEAM_RANGE,
+                  "lidar ranges") for i in range(self.n_beams_out)]
+        if self.observe_speed:
+            rows.append(L("v", "VESC", "/odom", "m/s", SPEED_MAX, "speed"))
+        if self.aim_feature:
+            rows.append(L("aim", "lidar", "/scan", "rad", HEADING_SCALE,
+                          "scan geometry"))
+        if self.drive_features:
+            rows += [L("free_ahead", "lidar", "/scan", "m", BEAM_RANGE,
+                       "scan geometry"),
+                     L("gap_dir", "lidar", "/scan", "rad", HEADING_SCALE,
+                       "scan geometry"),
+                     L("gap_bend", "lidar", "/scan", "rad", HEADING_SCALE,
+                       "scan geometry")]
+        if self.proprio:
+            rows += [L("v", "VESC", "/odom", "m/s", SPEED_MAX, "proprio"),
+                     L("delta", "servo", "/sensors/servo_position_command",
+                       "rad", STEER_MAX, "proprio"),
+                     L("yaw_rate", "IMU", "/sensors/imu", "rad/s", 3.0,
+                       "proprio"),
+                     L("ax (differenced)", "none", "-", "m/s^2", 10.0,
+                       "proprio"),
+                     L("ay (differenced)", "none", "-", "m/s^2", 10.0,
+                       "proprio")]
+        if self.grip_feature:
+            rows.append(L("grip_usage", "IMU", "/sensors/imu", "-", 2.0,
+                          "friction budget"))
+        if self.lookahead is not None:
+            rows += [L(f"lookahead[{d:g} m]", "particle filter + map",
+                       "/pf/pose/odom", "rad", HEADING_SCALE,
+                       "centreline lookahead") for d in self.lookahead]
+        if self.steer_feature:
+            rows.append(L("steer_cmd", "command echo", "/ackermann_cmd",
+                          "rad", STEER_MAX, "steering command"))
+        if self.corridor_feature:
+            rows.append(L("corridor_gate", "lidar", "/scan", "m",
+                          self.corridor_hi - self.corridor_lo,
+                          "corridor gate"))
+        rows += [L(f"de[{c}]", "lidar", "/scan", "-", 1.0,
+                   "disparity extender") for c in self.de_features]
+        wheels = (("f", "r") if self._n_wheel == 2 else
+                  ("FL", "FR", "RL", "RR") if self._n_wheel == 4 else ())
+        for c in self.sensors:
+            if c == "i":
+                rows += [L("imu_ax", "IMU", "/sensors/imu", "m/s^2",
+                           IMU_A_REF, "accelerations + yaw rate"),
+                         L("imu_ay", "IMU", "/sensors/imu", "m/s^2",
+                           IMU_A_REF, "accelerations + yaw rate"),
+                         L("imu_yaw_rate", "IMU", "/sensors/imu", "rad/s",
+                           GYRO_REF, "accelerations + yaw rate")]
+            elif c == "o":
+                rows += [L("odom_v", "VESC", "/odom", "m/s", SPEED_MAX,
+                           "body speed"),
+                         L("servo_delta", "servo", "/sensors/core", "rad",
+                           STEER_MAX, "steered angle")]
+            elif c == "w":
+                rows += [L(f"wheel_v[{w}]", "VESC", "/sensors/core", "m/s",
+                           SPEED_MAX, "wheel speeds") for w in wheels]
+            elif c == "s":
+                rows += [L(f"slip[{w}]", "VESC + /odom", "/sensors/core", "-",
+                           1.0, "wheel slip") for w in wheels]
+            elif c == "c":
+                rows.append(L("motor_current", "VESC",
+                              "/commands/motor/current", "A", CURRENT_REF,
+                              "motor current"))
+            elif c == "p":
+                rows += [L("lateral/half_width", "particle filter + map",
+                           "/pf/pose/odom", "-", 1.0, "pose error"),
+                         L("heading_error", "particle filter + map",
+                           "/pf/pose/odom", "rad", HEADING_SCALE,
+                           "pose error")]
+        return rows
 
     def _reward(self, x: np.ndarray, x_prev: np.ndarray) -> float:
         """Progress along the centreline if there is one, else distance moved.

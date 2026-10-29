@@ -23,6 +23,7 @@ from rtrrl_playground.envs.scuderia import ScuderiaLaneKeep, STEER_MAX
 
 def _bare(steer_feature, steer_mode="delta", steer_rate=6.0, dt=0.05):
     env = object.__new__(ScuderiaLaneKeep)
+    env.sensors = ""          # the car's own sensors, off
     env._idx = np.array([0, 1, 2])
     env.observe_speed = False
     env.aim_feature = False
