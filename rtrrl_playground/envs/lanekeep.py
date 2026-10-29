@@ -100,6 +100,16 @@ BEAM_RANGE = 5.0
 BEAM_STEP = 0.15
 
 
+def _as_patches(spec):
+    """``None``, one ``(s0, s1, factor)`` triple, or a sequence of them."""
+    if spec is None:
+        return ()
+    items = list(spec)
+    if len(items) == 3 and all(np.isscalar(v) for v in items):
+        items = [items]                      # a bare triple is one patch
+    return tuple((float(a), float(b), float(f)) for a, b, f in items)
+
+
 class LaneKeep(Env):
     id = "lanekeep"
 
@@ -151,9 +161,12 @@ class LaneKeep(Env):
         # intervention at a location and a time we choose, so the same
         # corner can be measured with the surface changed and unchanged, and
         # the geometry cancels.
-        self.grip_patch = (None if grip_patch is None else
-                           (float(grip_patch[0]), float(grip_patch[1]),
-                            float(grip_patch[2])))
+        #
+        # One triple is still one patch, so every run already banked keeps
+        # meaning what it meant. A *sequence* of them is a surface: the point
+        # of the master_cup work is a lap with slippery straights and grippy
+        # corners, and one stretch per lap cannot pose that question.
+        self.grip_patch = _as_patches(grip_patch)
         self.vehicle = vehicle or VehicleParams()
         self.dt = float(dt)
         self.max_steps = int(max_steps)
@@ -508,18 +521,29 @@ class LaneKeep(Env):
         self.psi += psi_dot * self.dt
         self.yaw_rate = psi_dot
 
-    def in_patch(self, s: float | None = None) -> bool:
-        """Whether arc position ``s`` is on the low-grip stretch."""
-        if self.grip_patch is None:
-            return False
-        s0, s1, _ = self.grip_patch
+    def patch_at(self, s: float | None = None):
+        """The patch covering arc position ``s``, or ``None``.
+
+        First match wins, so overlapping patches are resolved by the order
+        they were given rather than by which is more extreme.
+        """
+        if not self.grip_patch:
+            return None
         s = self._s if s is None else s
         s = float(s) % self.track.length
-        return s0 <= s < s1 if s0 <= s1 else (s >= s0 or s < s1)
+        for pt in self.grip_patch:
+            s0, s1, _f = pt
+            if (s0 <= s < s1) if s0 <= s1 else (s >= s0 or s < s1):
+                return pt
+        return None
+
+    def in_patch(self, s: float | None = None) -> bool:
+        """Whether arc position ``s`` is on a patch of changed friction."""
+        return self.patch_at(s) is not None
 
     def _grip_at(self, s: float) -> float:
-        return (self._base_grip * self.grip_patch[2] if self.in_patch(s)
-                else self._base_grip)
+        pt = self.patch_at(s)
+        return self._base_grip * pt[2] if pt is not None else self._base_grip
 
     def step(self, action):
         steer, throttle = self._decode(action)

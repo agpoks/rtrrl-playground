@@ -40,6 +40,8 @@ returns downsampled lidar only, because a POMDP is the point. Pass
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from rtrrl_playground.envs.vehicle import VehicleParams
@@ -93,6 +95,7 @@ class ScuderiaLaneKeep(Env):
                  half_width=None, width_scale: float = 1.0,
                  max_steps: int = 2000, control_repeat: int = 5,
                  start_pose=(0.0, 0.0, 0.0), grip: float | None = None,
+                 friction_map=None, friction_mu_range=(0.2, 2.0),
                  track_half_width: float | None = None,
                  n_steer: int = N_STEER, n_accel: int = N_ACCEL,
                  lookahead=None, aim_feature: bool = False,
@@ -169,6 +172,30 @@ class ScuderiaLaneKeep(Env):
         # .png and .pgm, and the loader takes the extension as an argument
         # rather than looking. ``levine`` is a .pgm; ``berlin``, ``skirk``,
         # ``vegas`` and ``stata_basement`` are .png.
+        # Spatially varying friction. The simulator has carried this since the
+        # port -- a grayscale PNG over the same extent as the occupancy map,
+        # looked up bilinearly and handed to the dynamics as `mu_scale` -- and
+        # this adapter simply never passed it, so every scuderia result in this
+        # project is at one constant mu. Given a path, the map's own yaml
+        # supplies the origin and resolution, so the two rasters cannot drift
+        # apart. Before `make`, for the reason the comment above gives.
+        self._fmap = None
+        if friction_map is not None:
+            from scuderia_gym_jax.envs.friction_map import FrictionMap
+            if isinstance(friction_map, (str, Path)):
+                png = Path(friction_map)
+                yml = png.with_suffix(".yaml")
+                if not yml.exists():
+                    raise FileNotFoundError(
+                        f"{png.name} needs {yml.name} beside it for the "
+                        f"origin and resolution the lookup is in terms of")
+                self._fmap = FrictionMap(str(png), str(yml),
+                                         mu_min=float(friction_mu_range[0]),
+                                         mu_max=float(friction_mu_range[1]),
+                                         mu_nominal=1.0)
+            else:
+                self._fmap = friction_map
+            make_kwargs["friction_map"] = self._fmap
         self.env = sgj.make(model=model, num_agents=1, produce_scans=True,
                             num_beams=num_beams, map_name=map_name,
                             map_ext=map_ext, collision_on=True, **make_kwargs)
@@ -644,7 +671,30 @@ class ScuderiaLaneKeep(Env):
         # underestimates braking certifies plans the car can over-deliver on,
         # and the reverse is what `bridges.safety.make_safe_agent` warns about.
         self.vehicle = VehicleParams(wheelbase=0.322, accel_max=1.0, drag=0.0)
-        self.grip = self._read_grip() if grip is None else float(grip)
+        #: The surface's nominal friction, and the friction under the car
+        #: right now. They are the same number without a friction map, and
+        #: `grip` is a property so that every existing reader --- the grip
+        #: feature, the grip penalty, `bridges.safety` --- sees the local
+        #: value without being told a map exists.
+        self._grip_const = self._read_grip() if grip is None else float(grip)
+        self._grip_now = self._grip_const
+        if self._fmap is not None:
+            # mu_nominal=1.0 above, so `lookup` is an absolute mu and
+            # `mu_scale` is mu itself: the dynamics want a ratio against the
+            # mu packed in the tyre parameters, which is what `_read_grip`
+            # returns, so the map is written in absolute mu and divided here.
+            self._fmap.mu_nominal = self._grip_const
+
+    @property
+    def grip(self) -> float:
+        """Friction under the car. Constant unless a friction map is set."""
+        return self._grip_now
+
+    def _refresh_grip(self) -> None:
+        if self._fmap is None or self._x is None:
+            return
+        self._grip_now = float(self._fmap.lookup(float(self._x[0, 0]),
+                                                 float(self._x[0, 1])))
 
     def _read_grip(self) -> float:
         """The simulator's own friction coefficient, not a guess at it.
@@ -1150,6 +1200,7 @@ class ScuderiaLaneKeep(Env):
         self._prev_s = None
         self.history = []
         self._x, self._scans = self._pull(self._state)
+        self._refresh_grip()
         return self._obs_from(self._x, self._scans)
 
     def step(self, action):
@@ -1165,6 +1216,7 @@ class ScuderiaLaneKeep(Env):
             # and hand the agent a transition that never happened.
             _o, self._state, _r, _d, _i = self._step_env(key, self._state, u)
         self._x, self._scans = self._pull(self._state)
+        self._refresh_grip()
         crashed = bool(np.asarray(self._state.collisions)[0])
         # Kept as three named parts, not one float. The scalar is all the
         # agent ever sees, but a figure of "the reward" that cannot say how

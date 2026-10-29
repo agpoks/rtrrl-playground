@@ -44,6 +44,7 @@ action from ``h = 0``, before the first observation has been fed in, so
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -725,6 +726,113 @@ class RTRRL:
         if reset_critic:
             self.critic.theta[:] = 0.0
         self.v_old = self.critic.value(self.h)
+
+    # -- checkpoints ------------------------------------------------------
+    #: The names, on the cell and the two heads, of arrays that are *learned*.
+    #: Deliberately not the traces, the influence or the membrane potential:
+    #: those are state. A checkpoint that carried them would resume a run,
+    #: and what this is for is seeding a new one from a trained policy.
+    PARAM_ATTRS = ("theta", "bias", "b", "log_sigma", "w_out")
+
+    def _param_arrays(self):
+        """``(qualified name, live array)`` for every learned array, in order."""
+        for owner, obj in (("cell", self.cell), ("actor", self.actor),
+                           ("critic", self.critic)):
+            for k in self.PARAM_ATTRS:
+                v = getattr(obj, k, None)
+                if isinstance(v, np.ndarray):
+                    yield f"{owner}.{k}", v
+
+    def fingerprint(self) -> dict:
+        """What a checkpoint has to agree with to be loadable into this agent.
+
+        Shapes alone would catch most mismatches, but not the ones that
+        matter most here: two cells of the same width, or two heads over the
+        same grid, have identical shapes and entirely different meanings.
+        """
+        return {"cell": type(self.cell).__name__,
+                "actor": type(self.actor).__name__,
+                "critic": type(self.critic).__name__,
+                "n_hidden": int(self.cell.n),
+                "n_params": int(self.n_params),
+                "shapes": {k: list(v.shape) for k, v in self._param_arrays()}}
+
+    def state_dict(self) -> dict[str, np.ndarray]:
+        """Copies of the learned arrays, keyed ``owner.name``."""
+        return {k: v.copy() for k, v in self._param_arrays()}
+
+    def load_state_dict(self, sd, strict: bool = True) -> list[str]:
+        """Write ``sd`` into the live arrays, then clear everything stateful.
+
+        In place, so the cell and the heads keep whatever structure they were
+        built with and a wrong shape is an error rather than a silent
+        rebuild. The traces and the recurrent state go afterwards: they
+        belong to the run that produced the checkpoint, not to this one.
+        """
+        want = dict(self._param_arrays())
+        missing = [k for k in want if k not in sd]
+        unknown = [k for k in sd if k not in want]
+        if strict and (missing or unknown):
+            raise KeyError(
+                f"checkpoint does not match this agent -- missing {missing}, "
+                f"unexpected {unknown}. Build the agent the same way the "
+                f"checkpoint was trained, or pass strict=False.")
+        loaded = []
+        for k, cur in want.items():
+            if k not in sd:
+                continue
+            new = np.asarray(sd[k], dtype=cur.dtype)
+            if new.shape != cur.shape:
+                raise ValueError(
+                    f"{k}: checkpoint has {new.shape}, this agent has "
+                    f"{cur.shape}")
+            cur[...] = new
+            loaded.append(k)
+        self._zero_traces()
+        self.reset_state()
+        return loaded
+
+    def save(self, path, **meta) -> Path:
+        """Write the learned arrays plus a fingerprint to a ``.npz``."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        blob = dict(self.state_dict())
+        blob["__meta__"] = np.asarray(
+            json.dumps({**meta, "fingerprint": self.fingerprint()}))
+        # Written through a file handle, not a name: `np.savez` appends
+        # `.npz` to a *name* that does not end in it, so a `.tmp` path would
+        # be saved one place and renamed from another.
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "wb") as fh:
+            np.savez(fh, **blob)
+        tmp.replace(path)
+        return path
+
+    @staticmethod
+    def read_meta(path) -> dict:
+        """The sidecar metadata, without building an agent."""
+        with np.load(Path(path), allow_pickle=False) as z:
+            if "__meta__" not in z:
+                return {}
+            return json.loads(str(z["__meta__"]))
+
+    def load(self, path, strict: bool = True) -> dict:
+        """Load a ``.npz`` written by :meth:`save`. Returns its metadata."""
+        path = Path(path)
+        with np.load(path, allow_pickle=False) as z:
+            meta = (json.loads(str(z["__meta__"]))
+                    if "__meta__" in z else {})
+            sd = {k: z[k] for k in z.files if k != "__meta__"}
+        fp = meta.get("fingerprint")
+        if strict and fp is not None:
+            mine = self.fingerprint()
+            for key in ("cell", "actor", "critic", "n_hidden"):
+                if fp.get(key) != mine[key]:
+                    raise ValueError(
+                        f"{path.name} was trained with {key}={fp.get(key)!r}, "
+                        f"this agent has {mine[key]!r}")
+        self.load_state_dict(sd, strict=strict)
+        return meta
 
     # -- evaluation -------------------------------------------------------
     def greedy(self, obs: np.ndarray, prev_a=None, prev_r: float = 0.0):
