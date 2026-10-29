@@ -1136,6 +1136,44 @@ class ScuderiaLaneKeep(Env):
         return float(self.half_width[k % len(self.half_width)]
                      if self.half_width.size > 1 else self.half_width[0])
 
+    def _match_wheel_speeds(self) -> None:
+        """Spin the wheel states up to the body speed before the first step.
+
+        ``std`` carries ``omega`` per axle and ``std4w`` per corner, and
+        ``reset`` leaves them at zero. Setting the body speed alone --- which
+        is all ``rolling_start`` did --- therefore began every episode with
+        **locked wheels under a car already doing 1 m/s**: the tyres start
+        saturated in longitudinal slip, combined slip takes the lateral grip
+        with it, and the car has no authority at all for the opening metres.
+        Measured here on ``master_cup_corridor_v2`` with ``model="std"``, the
+        first step of an episode dropped 1.000 -> 0.708 m/s at
+        ``a_x = -1.09 m/s^2`` with a zero command. ``mpcc-online-tuning`` hit
+        the same thing from the other side and recorded it in
+        ``plant_scuderia.py``: commanding +2 m/s^2 made the plant *decelerate*
+        2.0 -> 1.54 m/s.
+
+        This is why nothing on the dynamic models ever worked. Every ``std``
+        run this project has published started in a skid, and ``std`` is also
+        the only model that reads ``mu_scale`` --- so every friction-map
+        experiment was conducted on a car that spent its first metres with no
+        grip to lose. ``omega = v / R_w`` is the rolling condition, and it is a
+        no-op on the single-track models and at a standing start.
+        """
+        n = int(self._state.x.shape[1])
+        if n <= 7:
+            return
+        # read from the simulator, not from a constant here: a rolling
+        # condition written against a different wheel radius is a skid again,
+        # only a smaller one. Once per episode, so the array conversion is
+        # free against the reset itself.
+        R_w = float(np.asarray(self.env.params.veh).ravel()[13])
+        v0 = float(np.asarray(self._state.x)[0, 3])
+        w0 = v0 / max(R_w, 1e-9)
+        x = self._state.x
+        for i in range(7, n):
+            x = x.at[0, i].set(w0)
+        self._state = self._state.replace(x=x)
+
     def _pose_at(self, i: int):
         """Centreline point ``i``, facing along the track."""
         c = np.asarray(self.centreline, float)[:, :2]
@@ -1186,6 +1224,7 @@ class ScuderiaLaneKeep(Env):
         if self.accel_mode == "accl" and self.rolling_start:
             self._state = self._state.replace(
                 x=self._state.x.at[0, 3].set(float(self.rolling_start)))
+        self._match_wheel_speeds()
         self._steer_cmd = 0.0
         self._steer_out = 0.0
         self._steer_move = 0.0
