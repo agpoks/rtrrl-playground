@@ -728,11 +728,27 @@ class RTRRL:
         self.v_old = self.critic.value(self.h)
 
     # -- checkpoints ------------------------------------------------------
-    #: The names, on the cell and the two heads, of arrays that are *learned*.
-    #: Deliberately not the traces, the influence or the membrane potential:
-    #: those are state. A checkpoint that carried them would resume a run,
-    #: and what this is for is seeding a new one from a trained policy.
-    PARAM_ATTRS = ("theta", "bias", "b", "log_sigma", "w_out")
+    #: The names, on the cell and the two heads, of arrays a checkpoint must
+    #: carry. Two kinds, and leaving out either one breaks a reload:
+    #:
+    #: * the *learned* weights -- `theta`, `bias`, `log_sigma`;
+    #: * `B`, the feedback-alignment matrix on each head. It is drawn once at
+    #:   init and never trained, which makes it easy to mistake for part of
+    #:   the architecture rather than part of the model. It is not. The whole
+    #:   content of feedback alignment is that the forward weights co-adapt to
+    #:   whatever random `B` they were given -- heads.py says so in its own
+    #:   docstring -- so trained weights loaded beside a *fresh* `B` are being
+    #:   updated through a path they have never seen. Measured, on curvy: with
+    #:   `B` left out, a checkpoint that drives 420 m frozen collapses to
+    #:   ~150 m within 2,500 steps the moment any arm writes, while the frozen
+    #:   arm (which never routes a gradient) is untouched. That asymmetry is
+    #:   the signature, and it cost a sweep over the critic and the learning
+    #:   rate before the cause was found.
+    #:
+    #: Deliberately *not* the traces, the influence or the membrane potential:
+    #: those are state. A checkpoint that carried them would resume a run, and
+    #: what this is for is seeding a new one from a trained policy.
+    PARAM_ATTRS = ("theta", "bias", "b", "log_sigma", "w_out", "B")
 
     def _param_arrays(self):
         """``(qualified name, live array)`` for every learned array, in order."""
@@ -755,6 +771,11 @@ class RTRRL:
                 "critic": type(self.critic).__name__,
                 "n_hidden": int(self.cell.n),
                 "n_params": int(self.n_params),
+                # `n_params` counts the learned weights only, so it is NOT the
+                # size of a checkpoint: the feedback matrices are carried too.
+                "n_saved": int(sum(v.size for _k, v in self._param_arrays())),
+                "feedback": {"actor": getattr(self.actor, "feedback", None),
+                             "critic": getattr(self.critic, "feedback", None)},
                 "shapes": {k: list(v.shape) for k, v in self._param_arrays()}}
 
     def state_dict(self) -> dict[str, np.ndarray]:
