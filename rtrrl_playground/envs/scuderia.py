@@ -131,6 +131,7 @@ class ScuderiaLaneKeep(Env):
                  drive_features: bool = False, proprio: bool = False,
                  grip_feature: bool = False, steer_feature: bool = False,
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
+                 speed_bonus: float = 0.0, speed_floor: float = 0.0,
                  reverse_penalty: float = 0.0,
                  steer_move_penalty: float = 0.0,
                  accel_rate: float | None = None,
@@ -352,6 +353,22 @@ class ScuderiaLaneKeep(Env):
         self._accel_cmd = 0.0
         self._accel_jerk = 0.0
         self.grip_target = float(grip_target)
+        #: A reason to go faster, which the progress reward alone does not
+        #: give. Progress pays per metre and an episode ends on a crash, so a
+        #: policy that crawls collects for longer than one that pushes: the
+        #: optimum is slow-and-alive and every measured policy here sits in
+        #: it, holding 1.3 m/s where the geometry allows 1.8 and giving away
+        #: 1.4 laps' worth of distance over a 400 s drive.
+        #:
+        #: `speed_bonus` pays `k * max(0, v - speed_floor) / SPEED_MAX` per
+        #: step, in the same units as progress, and is zero by default so
+        #: every result measured before today keeps its meaning. It pays only
+        #: above a floor so that ordinary slow sections are not taxed, and it
+        #: is a bonus rather than a time cost on purpose: a per-step cost
+        #: makes ending the episode early *cheaper* than driving slowly,
+        #: which is a way of teaching a car to crash.
+        self.speed_bonus = float(speed_bonus)
+        self.speed_floor = float(speed_floor)
         self.grip_feature = bool(grip_feature)
         self._prev_vxy = None
         self._prev_g = None
@@ -1624,6 +1641,11 @@ class ScuderiaLaneKeep(Env):
             xx = self._x[0]
             usage = abs(float(xx[3]) * float(xx[5])) / (self.grip * 9.81)
             r_grip = -self.grip_penalty * max(0.0, usage - self.grip_target)
+        r_speed = 0.0
+        if self.speed_bonus:
+            r_speed = (self.speed_bonus
+                       * max(0.0, float(self._x[0][3]) - self.speed_floor)
+                       / SPEED_MAX)
         r_reverse = (-self.reverse_penalty
                      if self.reverse_penalty and self._steer_flip else 0.0)
         r_ajerk = -self.accel_jerk_penalty * self._accel_jerk
@@ -1632,7 +1654,8 @@ class ScuderiaLaneKeep(Env):
         # `corridor_steer_penalty` for why the gate is not another flat cost
         r_corr = (-self.corridor_steer_penalty * self._corridor_gate
                   * self._steer_move)
-        reward = r_progress + r_grip + r_reverse + r_ajerk + r_smove + r_corr
+        reward = (r_progress + r_speed + r_grip + r_reverse + r_ajerk
+                  + r_smove + r_corr)
         self._t += 1
         x = self._x[0]
         self.history.append(dict(x=float(x[0]), y=float(x[1]), psi=float(x[4]),
@@ -1652,7 +1675,8 @@ class ScuderiaLaneKeep(Env):
             self._last_end = (float(x[0]), float(x[1]))
             return (np.zeros(self.obs_dim), -1.0, True, False,
                     {"crashed": bool(crashed), "off_track": off_track,
-                     "lateral": lateral, "r_progress": 0.0, "r_grip": 0.0,
+                     "lateral": lateral, "r_progress": 0.0, "r_speed": 0.0,
+                     "r_grip": 0.0,
                      "r_reverse": 0.0, "r_accel_jerk": 0.0,
                      "r_steer_move": 0.0, "r_corridor": 0.0,
                      "r_crash": -1.0})
@@ -1660,6 +1684,7 @@ class ScuderiaLaneKeep(Env):
         return (self._obs_from(self._x, self._scans), float(reward), False, truncated,
                 {"crashed": False, "off_track": False, "lateral": lateral,
                  "v": float(x[3]), "r_progress": float(r_progress),
+                 "r_speed": float(r_speed),
                  "r_grip": float(r_grip), "r_reverse": float(r_reverse),
                  "r_accel_jerk": float(r_ajerk),
                  "r_steer_move": float(r_smove),
