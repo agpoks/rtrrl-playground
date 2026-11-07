@@ -141,6 +141,8 @@ class ScuderiaLaneKeep(Env):
                  corridor_lo: float = 3.0,
                  corridor_hi: float = 6.0,
                  corridor_feature: bool = False,
+                 progress_interp: bool = False,
+                 lateral_interp: bool = False,
                  de_features: str = "",
                  de_cone_deg: float = 6.0, de_margin: float = 0.0,
                  sensors: str = "",
@@ -462,6 +464,38 @@ class ScuderiaLaneKeep(Env):
         #: something unobservable, which is what `steer_feature` was added to
         #: stop. Separate flag so the feature and the price can be told apart.
         self.corridor_feature = bool(corridor_feature)
+        #: Measure progress by projecting onto the centreline polyline
+        #: instead of snapping to the nearest sample. Off by default because
+        #: every banked result was measured snapped, and the mean reward is
+        #: the same either way -- what changes is the per-step variance.
+        #:
+        #: Snapped, `_arc` returns the arc length of the nearest *sample*, so
+        #: progress is a staircase: master_cup is resampled at 0.1993 m, a
+        #: control step at 1.35 m/s covers 0.0675 m, and the reward unit is
+        #: SPEED_MAX * dt = 0.2 m. The index therefore advances on one step in
+        #: three and pays ~1.0 when it does, instead of paying 0.34 every
+        #: step. The mean is right and the return is right, so the critic
+        #: fits it -- but the per-step TD error carries a +-1 square wave the
+        #: critic cannot predict, because which step the stair falls on
+        #: depends on sub-sample position, not on anything the policy did.
+        #: Measured on a flawless frozen rollout: delta is +0.78 on the step
+        #: that pays and -0.32 on the steps that do not, sd 1.2, and 97 % of
+        #: the run's total |delta| is this artefact rather than crashes.
+        #: Any arm that writes multiplies that noise into the actor.
+        self.progress_interp = bool(progress_interp)
+        #: The same argmin, costing the same half-spacing, on the quantity
+        #: that ENDS the episode. `_nearest` returns the distance to the
+        #: closest centreline *sample*, so a car sitting exactly on the line
+        #: reads a lateral offset of 0.0665 m on master_cup (max 0.1178), half
+        #: the 0.1993 m resample spacing. Against the 0.60 m corridor that is
+        #: 17 % of the budget and was tolerable; against the 0.22 m corners
+        #: cut for `master_cup_changed_n22` it is up to 54 %, so the narrow
+        #: tracks are materially tighter than the number they were cut to.
+        #:
+        #: Off by default: this moves the termination boundary, and every
+        #: banked result -- every half-width, every off-track count -- was
+        #: measured against the snapped distance.
+        self.lateral_interp = bool(lateral_interp)
         self._corridor_m = float(corridor_hi)
         self._corridor_gate = 0.0
         #: Which of the six disparity-extender features to append, as a
@@ -1475,7 +1509,8 @@ class ScuderiaLaneKeep(Env):
         """
         if self.centreline is None:
             return float(np.linalg.norm(x[0, :2] - x_prev[0, :2])) / (SPEED_MAX * self.dt)
-        s = self._arc(x[0, :2])
+        s = (self._arc_interp(x[0, :2]) if self.progress_interp
+             else self._arc(x[0, :2]))
         if self._prev_s is None:
             self._prev_s = s
             return 0.0
@@ -1491,6 +1526,36 @@ class ScuderiaLaneKeep(Env):
         """Arc length of the nearest centreline point, in metres."""
         return self._nearest(xy)[0]
 
+    def _arc_interp(self, xy) -> float:
+        """Arc length projected onto the polyline, in metres.
+
+        `_arc` snaps to a sample and so quantises progress to the resample
+        spacing. This projects onto the nearer of the two segments meeting at
+        that sample, which makes progress continuous in the car's position.
+
+        Only `_reward` uses it. `_nearest` is left alone on purpose: its
+        lateral distance sets the episode's termination boundary, and every
+        banked result -- including the half-widths the narrow tracks were cut
+        to -- was measured against the snapped one.
+        """
+        c = self.centreline
+        n = len(c)
+        k = int(np.argmin(np.sum((c - xy) ** 2, axis=1)))
+        best_s, best_d2 = float(self._cl_s[k]), float("inf")
+        for j in (k - 1, k):
+            a, b = c[j % n], c[(j + 1) % n]
+            ab = b - a
+            L2 = float(ab @ ab)
+            if L2 <= 0.0:
+                continue
+            t = float(np.clip((xy - a) @ ab / L2, 0.0, 1.0))
+            d = xy - (a + t * ab)
+            d2 = float(d @ d)
+            if d2 < best_d2:
+                best_s = float(self._cl_s[j % n]) + t * float(np.sqrt(L2))
+                best_d2 = d2
+        return best_s
+
     def _nearest(self, xy) -> tuple[float, float]:
         """``(arc length, lateral distance)`` of the nearest centreline point.
 
@@ -1502,7 +1567,26 @@ class ScuderiaLaneKeep(Env):
         """
         d2 = np.sum((self.centreline - xy) ** 2, axis=1)
         k = int(np.argmin(d2))
-        return float(self._cl_s[k]), float(np.sqrt(d2[k])), k
+        if not self.lateral_interp:
+            return float(self._cl_s[k]), float(np.sqrt(d2[k])), k
+        #: Perpendicular distance to the nearer of the two segments meeting
+        #: at that sample, and the arc length of the foot of that
+        #: perpendicular -- the quantities the snapped pair approximates.
+        c, n = self.centreline, len(self.centreline)
+        best_s, best_d2 = float(self._cl_s[k]), float(d2[k])
+        for j in (k - 1, k):
+            a, b = c[j % n], c[(j + 1) % n]
+            ab = b - a
+            L2 = float(ab @ ab)
+            if L2 <= 0.0:
+                continue
+            t = float(np.clip((xy - a) @ ab / L2, 0.0, 1.0))
+            d = xy - (a + t * ab)
+            dd = float(d @ d)
+            if dd < best_d2:
+                best_s = float(self._cl_s[j % n]) + t * float(np.sqrt(L2))
+                best_d2 = dd
+        return best_s, float(np.sqrt(best_d2)), k
 
     def _limit_at(self, k: int) -> float:
         """The half-width in force at centreline index ``k``."""
