@@ -89,7 +89,7 @@ class RTRRL:
     from a flag.
     """
 
-    def _advance(self, x: np.ndarray) -> np.ndarray:
+    def _advance_raw(self, x: np.ndarray) -> np.ndarray:
         """Step the cell, and low-pass what the heads see of it.
 
         Every path that reads the cell goes through here, so training,
@@ -105,10 +105,24 @@ class RTRRL:
                      else (1.0 - a) * self._h_f + a * h)
         return self._h_f
 
+    def _advance(self, x: np.ndarray) -> np.ndarray:
+        """Step the cell, then carry the critic's own filter with it."""
+        h = self._advance_raw(x)
+        if self.critic_tau:
+            a = 1.0 / max(self.critic_tau, 1.0)
+            self._h_c = (h.copy() if self._h_c is None
+                         else (1.0 - a) * self._h_c + a * h)
+        return h
+
+    def _critic_h(self) -> np.ndarray:
+        """The state the critic reads: filtered when `critic_tau` is set."""
+        return self.h if not self.critic_tau or self._h_c is None else self._h_c
+
     def reset_state(self) -> None:
-        """Clear the cell *and* the read-out filter at an episode boundary."""
+        """Clear the cell *and* both read-out filters at an episode boundary."""
         self.cell.reset_state()
         self._h_f = None
+        self._h_c = None
 
     def _fires(self) -> bool:
         """Whether the accumulated update is applied on this step.
@@ -191,6 +205,7 @@ class RTRRL:
                  smooth_sigma: float = 0.1, smooth_rnn: float = 1.0,
                  cell: str = "ctrnn", estimator: str = "rflo", feedback: str = "random",
                  head: str = "softmax", readout_tau: float = 0.0,
+                 critic_tau: float = 0.0,
                  critic_update: str = "true-online", critic_lr_mode: str = "normalized",
                  critic_decay: float = 0.0, actor_trust: float = 0.0,
                  meta_inputs: bool = True, clip: float = 1.0,
@@ -347,6 +362,31 @@ class RTRRL:
         #: 0 disables it, and every result before 2026-10-15 was measured so.
         self.readout_tau = float(readout_tau)
         self._h_f: np.ndarray | None = None
+        #: Low-pass the state *the critic reads*, and only the critic.
+        #:
+        #: On a policy that is already driving well the TD error is almost
+        #: entirely the critic's own step-to-step jitter rather than reward or
+        #: prediction error: measured on a flawless frozen rollout,
+        #: corr(delta, gamma V(s') - V(s)) = 0.93 raw and 0.99 once the
+        #: progress staircase is taken out, for a signal-to-noise of about
+        #: 2 %. V is a linear read-out of a *spiking* state, so it moves
+        #: discontinuously while the car glides, and `step_a = lr_actor *
+        #: delta` multiplies that into the actor on every write.
+        #:
+        #: `readout_tau` would also fix it, but it filters what the policy
+        #: sees as well, so it changes the controller and invalidates any
+        #: warm start. This filters the critic's view alone: the actor still
+        #: reads `self.h` raw, the action sequence of a frozen policy is
+        #: unchanged bit for bit, and only `delta` is quieter. Because the
+        #: read-out is linear (V = theta . h + b) this is exactly a low-pass
+        #: on V, so the level -- and with it the -1 - V(s) a crash is worth --
+        #: survives while the jitter does not. Simulated on the banked
+        #: traces at tau = 10 steps (0.5 s): crash signal 59 -> 60, injected
+        #: noise 70 -> 10, SNR 0.85 -> 5.9.
+        #:
+        #: 0 disables it, and every result before 2026-11-08 was measured so.
+        self.critic_tau = float(critic_tau)
+        self._h_c: np.ndarray | None = None
         self.smoothing = bool(smooth_t or smooth_s)
         head_kw = dict(feedback=feedback, entropy_coef=entropy_coef,
                       sticky_prob=sticky_prob, rng=self.rng)
@@ -443,7 +483,7 @@ class RTRRL:
         # term is a *difference* between successive weight vectors evaluated at
         # the same state, and seeding it with 0 injects one spurious update
         # worth of the initial value at every episode boundary.
-        self.v_old = self.critic.value(self.h)
+        self.v_old = self.critic.value(self._critic_h())
         self.a, self.cache = self.actor.act(self.h, self.rng)
         return self.a
 
@@ -457,7 +497,9 @@ class RTRRL:
         """
         r = float(reward) * self.reward_scale
         h_t = self.h
-        phi_t = self.critic.features(h_t)
+        #: The actor's gradients are taken at the raw state; only the critic's
+        #: features are filtered, so `critic_tau` cannot move the policy.
+        phi_t = self.critic.features(self._critic_h())
         v_now = float(self.critic.theta @ phi_t)  # V(s_t) under the *current* weights
         # The Dutch trace is only stable while alpha * ||phi||^2 <= 1, and with
         # n tanh units ||phi||^2 drifts from ~1 at init (h starts at zero, only
@@ -504,7 +546,7 @@ class RTRRL:
 
         # --- 3. now advance the recurrent state (and its influence) ----------
         self.h = self._advance(self._input(obs, self.a, reward))
-        v_next = 0.0 if terminated else self.critic.value(self.h)
+        v_next = 0.0 if terminated else self.critic.value(self._critic_h())
         delta = r + self.gamma * v_next - v_now
 
         # --- 3b. traces -- every one of them at time t ----------------------
@@ -725,7 +767,7 @@ class RTRRL:
         self._zero_traces()
         if reset_critic:
             self.critic.theta[:] = 0.0
-        self.v_old = self.critic.value(self.h)
+        self.v_old = self.critic.value(self._critic_h())
 
     # -- checkpoints ------------------------------------------------------
     #: The names, on the cell and the two heads, of arrays a checkpoint must
