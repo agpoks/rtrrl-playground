@@ -130,6 +130,7 @@ class ScuderiaLaneKeep(Env):
                  steer_filter: float = 0.0,
                  drive_features: bool = False, proprio: bool = False,
                  grip_feature: bool = False, steer_feature: bool = False,
+                 friction_feature: bool = False,
                  grip_penalty: float = 0.0, grip_target: float = 0.8,
                  speed_bonus: float = 0.0, speed_floor: float = 0.0,
                  reverse_penalty: float = 0.0,
@@ -372,6 +373,19 @@ class ScuderiaLaneKeep(Env):
         self.speed_bonus = float(speed_bonus)
         self.speed_floor = float(speed_floor)
         self.grip_feature = bool(grip_feature)
+        #: The friction circle one step ahead, as two observations. Off by
+        #: default: it widens `obs_dim`, so a checkpoint saved without it
+        #: cannot be warm-started into a run with it. See `_friction_obs`.
+        self.friction_feature = bool(friction_feature)
+        self._friction_afford = self._friction_headroom = float("nan")
+        # Read from the running model rather than restated here, for the same
+        # reason `bridges/friction.py` exists at all: lf + lr is 0.322 on this
+        # car and that is also `affordable`'s default, but a constant copied
+        # into two files is a constant that will eventually disagree with
+        # itself. `veh[0]` and `veh[1]` are lf and lr -- see
+        # `scuderia_gym_jax.envs.packing.pack_std_vehicle_params`.
+        _veh = np.asarray(self.env.params.veh).ravel()
+        self.wheelbase = float(_veh[0] + _veh[1])
         self._prev_vxy = None
         self._prev_g = None
         # How the steering half of an action is read. "absolute" places the
@@ -632,6 +646,7 @@ class ScuderiaLaneKeep(Env):
                         + 3 * int(self.drive_features)
                         + 5 * int(self.proprio)
                         + int(self.grip_feature)
+                        + 2 * int(self.friction_feature)
                         + int(self.steer_feature)
                         + int(self.corridor_feature)
                         + len(self.de_features)
@@ -1303,7 +1318,52 @@ class ScuderiaLaneKeep(Env):
             # Truly last: everything above is a lidar or map feature whose
             # index some figure, checkpoint or docstring already quotes.
             parts.append(self._sensor_obs(x))
+        # `getattr`, not an attribute read: `tests/test_sensors.py` and others
+        # build this object with `object.__new__` and set the flags they care
+        # about by hand, so a new flag read directly here breaks every stub
+        # that predates it. Same reason `_jerk_unlimited` is read this way.
+        if getattr(self, "friction_feature", False):
+            # After `sensors`, which until now held the "truly last" slot, so
+            # every checkpoint and every feature index quoted elsewhere still
+            # means what it meant. See `_friction_obs` for what the two
+            # numbers are and why `grip_feature` is not already them.
+            parts.append(self._friction_obs(x))
         return np.concatenate(parts) if len(parts) > 1 else parts[0]
+
+    def _friction_obs(self, x: np.ndarray) -> np.ndarray:
+        """The friction circle one step *ahead*, which nothing else reports.
+
+        `grip_feature` is the accelerometer: how much of the tyre the car is
+        using *now*. That is a measurement of a decision already taken. These
+        two are the forward-looking form, from `bridges.friction.affordable`
+        over the same action grid the policy chooses from:
+
+        ``afford`` -- the share of the grid that stays inside the circle one
+            step from now. 1.0 is a straight at walking pace; it falls as the
+            car commits, and the policy can read it before it is committed.
+        ``headroom`` -- the *lowest* demand any action could achieve. Below
+            1.0 some action still fits inside the tyre. At 1.0 none does, and
+            the departure that follows was decided one or more steps earlier.
+
+        Measured on the `why_worse` traces, the lowest achievable demand
+        crosses 1.0 on 7.6 % of the learning arms\' driving steps and on 0.0 %
+        of frozen\'s, hundreds of steps before any crash -- so this is an
+        observation with warning in it rather than a restatement of the crash.
+        Stored on `self` too, so `experiments/` can log what the policy saw.
+        """
+        from bridges.friction import affordable
+        v, delta = float(x[0, 3]), float(self._steer_cmd)
+        mask, dem = affordable(
+            self.action_grid, v, delta, wheelbase=self.wheelbase,
+            steer_max=STEER_MAX, mu=self.grip, dt=self.dt,
+            steer_mode=self.steer_mode, steer_rate=self.steer_rate,
+            brake_max=(None if self.accel_mode == "accl" else self.brake_max))
+        afford = float(mask.mean())
+        # clipped at 2 and halved, as `grip_feature` is, so the two friction
+        # channels share a scale and a reader can compare them directly
+        headroom = float(np.clip(dem.min(), 0.0, 2.0) / 2.0)
+        self._friction_afford, self._friction_headroom = afford, headroom
+        return np.array([afford, headroom])
 
     @property
     def n_sensor_channels(self) -> int:
@@ -1496,6 +1556,13 @@ class ScuderiaLaneKeep(Env):
                          L("heading_error", "particle filter + map",
                            "/pf/pose/odom", "rad", HEADING_SCALE,
                            "pose error")]
+        # Last, matching `_obs_from`: these two are appended after the sensor
+        # block, so this table and the observation stay in the same order.
+        if getattr(self, "friction_feature", False):
+            rows += [L("friction_afford", "IMU + map", "derived", "-", 1.0,
+                       "friction circle ahead"),
+                     L("friction_headroom", "IMU + map", "derived", "-", 2.0,
+                       "friction circle ahead")]
         return rows
 
     def _reward(self, x: np.ndarray, x_prev: np.ndarray) -> float:
